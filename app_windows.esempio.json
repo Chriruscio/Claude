@@ -1,0 +1,5 @@
+{
+  "discord":  ["discord:",    "Discord.exe"],
+  "paint":    ["mspaint.exe", "mspaint.exe"],
+  "whatsapp": ["whatsapp:",   "WhatsApp.exe"]
+}

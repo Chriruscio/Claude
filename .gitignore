@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+app_windows.json
+app_mac.json

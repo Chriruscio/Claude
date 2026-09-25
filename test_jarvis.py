@@ -86,6 +86,58 @@ class TestSandbox(unittest.TestCase):
         self.assertIn("Rifiutato", jarvis.tool_elenca_file("../"))
 
 
+class TestFileApp(unittest.TestCase):
+    BASE_WIN = {"blocco note": ("notepad.exe", "notepad.exe")}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cartella = Path(self._tmp.name)
+        self._originali = (jarvis.IS_WIN, jarvis.WORKSPACE)
+        jarvis.IS_WIN = True
+        jarvis.WORKSPACE = self.cartella / "workspace"
+
+    def tearDown(self):
+        jarvis.IS_WIN, jarvis.WORKSPACE = self._originali
+        self._tmp.cleanup()
+
+    def _file(self, testo, cartella=None):
+        cartella = cartella or self.cartella
+        cartella.mkdir(parents=True, exist_ok=True)
+        p = cartella / "app_windows.json"
+        p.write_text(testo, encoding="utf-8")
+        return p
+
+    def test_file_assente_usa_la_base(self):
+        risultato = jarvis._carica_app(self.BASE_WIN, self.cartella / "manca.json")
+        self.assertEqual(risultato, self.BASE_WIN)
+
+    def test_aggiunge_e_sostituisce(self):
+        p = self._file('{"Discord": ["discord:", "Discord.exe"], "blocco note": ["notepad.exe", null]}')
+        risultato = jarvis._carica_app(self.BASE_WIN, p)
+        self.assertEqual(risultato["discord"], ("discord:", "Discord.exe"))
+        self.assertEqual(risultato["blocco note"], ("notepad.exe", None))
+
+    def test_json_rotto_usa_la_base(self):
+        p = self._file('{\n "discord": ["discord:", "Discord.exe"]\n "x": ["a", "b"]\n}')
+        self.assertEqual(jarvis._carica_app(self.BASE_WIN, p), self.BASE_WIN)
+
+    def test_voce_scritta_male_ignorata(self):
+        p = self._file('{"buona": ["a.exe", "a.exe"], "cattiva": "a.exe", "vuota": ["", "a.exe"]}')
+        risultato = jarvis._carica_app(self.BASE_WIN, p)
+        self.assertIn("buona", risultato)
+        self.assertNotIn("cattiva", risultato)
+        self.assertNotIn("vuota", risultato)
+
+    def test_file_dentro_la_sandbox_ignorato(self):
+        p = self._file('{"cmd": ["cmd.exe", "cmd.exe"]}', cartella=jarvis.WORKSPACE)
+        self.assertNotIn("cmd", jarvis._carica_app(self.BASE_WIN, p))
+
+    def test_nome_mac_con_virgolette_rifiutato(self):
+        jarvis.IS_WIN = False
+        self.assertTrue(jarvis._voce_app_valida("Google Chrome"))
+        self.assertFalse(jarvis._voce_app_valida('Finder" to do shell script "x'))
+
+
 class TestComandiLocali(unittest.TestCase):
     def test_uscita(self):
         for frase in ["Esci", "Jarvis, spegniti", "arrivederci jarvis", "termina la sessione"]:

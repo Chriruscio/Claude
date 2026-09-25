@@ -5,6 +5,7 @@ Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolt
 
 ## 2. File coinvolti
 - `jarvis.py` — unico file del programma. Contiene configurazione, rilevamento del sistema operativo, sintesi vocale, ascolto microfonico, whitelist applicazioni (una per sistema), sandbox dei file, implementazione degli strumenti, ciclo di dialogo con l'API e loop principale.
+- `app_windows.json` / `app_mac.json` (facoltativi, non versionati) — elenco personale di app, accanto a `jarvis.py`. Si aggiunge all'elenco di base e ne sostituisce le voci con lo stesso nome. Se il file ha errori, J.A.R.V.I.S. lo segnala all'avvio e usa solo l'elenco di base. Esempio da copiare: `app_windows.esempio.json`.
 - `test_jarvis.py` — test della logica indipendente dall'hardware (sandbox, comandi locali, ciclo di dialogo con client finto). `python3 -m unittest test_jarvis -v`.
 
 ## 3. Logica principale
@@ -26,6 +27,7 @@ Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e
 - Whitelist di strumenti invece di esecuzione shell libera: il modello non deve avere potere arbitrario sul computer.
 - Nomi delle app come `enum` nello schema e risolti tramite dizionario: nessun testo generato dal modello raggiunge `open`, `osascript`, `os.startfile` o `taskkill`.
 - Lettura e scrittura file confinate a una sandbox (default `~/Jarvis/workspace`), controllata con `resolve()` (segue i collegamenti simbolici). Estensioni in lista bianca (`.txt .md .csv .json .log`); il carattere `:` è vietato (percorsi `C:file` e flussi alternativi NTFS).
+- Elenco app personale in un file separato: aggiornare `jarvis.py` non cancella le app aggiunte dall'utente. Il file viene ignorato se si trova dentro la sandbox, perché il modello non deve poter allargare la whitelist. Su macOS i nomi con `"` o `\` vengono rifiutati, perché finiscono dentro AppleScript.
 - Su Windows `esplora risorse` si apre ma non si chiude da voce: chiudere `explorer.exe` fa sparire la barra delle applicazioni.
 - Comandi locali riconosciuti solo se la frase è esattamente il comando (a meno di "Jarvis", "per favore", "grazie"): prima "riesci ad aprire Safari?" conteneva "esci" e spegneva l'assistente.
 - `max_uses: 3` sul web search: ogni ricerca costa circa 0,01 $, più i token dei risultati che entrano nel contesto.
@@ -37,6 +39,8 @@ Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e
 - Non reintrodurre pyttsx3, né la chiave API nel sorgente.
 - Non rimuovere i controlli su percorsi assoluti, `..`, `:` e il confronto dopo `resolve()` nella sandbox.
 - Non tornare a una lista nera di estensioni.
+- Non mettere il file dell'elenco app dentro la sandbox, né dare al modello uno strumento per modificarlo.
+- Non dare a J.A.R.V.I.S. accesso in scrittura al proprio codice.
 - Non usare `taskkill /F`: perde il lavoro non salvato.
 - Non richiedere il permesso Accessibilità di macOS.
 - Non aggiungere un collegamento di rete tra le due istanze senza una revisione di sicurezza dedicata.

@@ -276,7 +276,59 @@ APP_WIN = {
     "impostazioni": ("ms-settings:", "SystemSettings.exe"),
 }
 
-APP_CONSENTITE = APP_WIN if IS_WIN else APP_MAC
+# Elenco personale, modificabile a mano: si aggiunge a quello di base e ne sostituisce
+# le voci con lo stesso nome. Sta accanto a jarvis.py, MAI dentro la sandbox:
+# se il modello potesse scriverci, potrebbe mettere in lista qualunque programma.
+FILE_APP = Path(__file__).resolve().parent / ("app_windows.json" if IS_WIN else "app_mac.json")
+
+
+def _voce_app_valida(valore) -> bool:
+    if IS_WIN:
+        return (
+            isinstance(valore, list) and len(valore) == 2
+            and isinstance(valore[0], str) and valore[0].strip() != ""
+            and (valore[1] is None or isinstance(valore[1], str))
+        )
+    # Il nome finisce dentro 'tell application "..."': niente virgolette ne' barre.
+    return isinstance(valore, str) and valore.strip() != "" and not set('"\\') & set(valore)
+
+
+def _carica_app(base: dict, percorso: Path) -> dict:
+    """Elenco di base + voci del file personale. Se il file ha errori, resta solo la base."""
+    if not percorso.exists():
+        return dict(base)
+    if WORKSPACE.resolve() in percorso.parents:
+        print(f"[ATTENZIONE: {percorso.name} e' dentro la cartella di lavoro di J.A.R.V.I.S.: ignorato]")
+        return dict(base)
+    try:
+        dati = json.loads(percorso.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as e:
+        print(f"[ATTENZIONE: {percorso.name} ha un errore alla riga {e.lineno}: {e.msg}. "
+              "Uso solo l'elenco di base.]")
+        return dict(base)
+    except OSError as e:
+        print(f"[ATTENZIONE: {percorso.name} non leggibile ({e}). Uso solo l'elenco di base.]")
+        return dict(base)
+    if not isinstance(dati, dict):
+        print(f"[ATTENZIONE: {percorso.name} deve contenere un elenco tra graffe {{ }}. "
+              "Uso solo l'elenco di base.]")
+        return dict(base)
+
+    risultato = dict(base)
+    aggiunte = 0
+    for nome, valore in dati.items():
+        if not _voce_app_valida(valore):
+            formato = '["cosa aprire", "processo.exe"]' if IS_WIN else '"Nome App"'
+            print(f"[ATTENZIONE: in {percorso.name} la voce '{nome}' e' scritta male "
+                  f"(formato atteso: {formato}). Ignorata.]")
+            continue
+        risultato[nome.strip().lower()] = tuple(valore) if IS_WIN else valore
+        aggiunte += 1
+    print(f"[{percorso.name}: {aggiunte} app caricate]")
+    return risultato
+
+
+APP_CONSENTITE = _carica_app(APP_WIN if IS_WIN else APP_MAC, FILE_APP)
 
 
 # ==========================================================================
@@ -319,12 +371,12 @@ def tool_apri_app(nome: str) -> str:
     if chiave not in APP_CONSENTITE:
         return f"App '{nome}' non presente nella whitelist."
     if IS_MAC:
-        app = APP_MAC[chiave]
+        app = APP_CONSENTITE[chiave]
         esito = subprocess.run(["open", "-a", app], capture_output=True, text=True, timeout=20)
         if esito.returncode == 0:
             return f"{app} aperta."
         return f"Impossibile aprire {app}: {esito.stderr.strip() or 'app non installata'}"
-    bersaglio, _ = APP_WIN[chiave]
+    bersaglio, _ = APP_CONSENTITE[chiave]
     try:
         os.startfile(bersaglio)  # solo Windows; il bersaglio viene dal dizionario, non dal modello
     except OSError as e:
@@ -337,7 +389,7 @@ def tool_chiudi_app(nome: str) -> str:
     if chiave not in APP_CONSENTITE:
         return f"App '{nome}' non presente nella whitelist."
     if IS_MAC:
-        app = APP_MAC[chiave]
+        app = APP_CONSENTITE[chiave]
         esito = subprocess.run(
             ["osascript", "-e", f'tell application "{app}" to quit'],
             capture_output=True, text=True, timeout=30,
@@ -348,7 +400,7 @@ def tool_chiudi_app(nome: str) -> str:
             f"Impossibile chiudere {app}: {esito.stderr.strip()}. "
             "Potrebbe servire il permesso Automazione in Impostazioni > Privacy e sicurezza."
         )
-    _, processo = APP_WIN[chiave]
+    _, processo = APP_CONSENTITE[chiave]
     if processo is None:
         return f"{chiave} non si puo' chiudere da comando vocale."
     # Senza /F: chiusura gentile, l'app puo' chiedere di salvare. Niente chiusure forzate.
