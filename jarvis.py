@@ -386,14 +386,40 @@ class Orecchie:
             except sr.WaitTimeoutError:
                 return ""
         try:
-            testo = self.recognizer.recognize_google(audio, language=STT_LANG)
+            risultato = self.recognizer.recognize_google(audio, language=STT_LANG, show_all=True)
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
             print(f"[Servizio di trascrizione non raggiungibile: {e}]")
             return ""
-        print(f"Tu: {testo}")
+        testo = scegli_trascrizione(risultato)
+        if testo:
+            print(f"Tu: {testo}")
         return testo
+
+
+def scegli_trascrizione(risultato) -> str:
+    """
+    Google restituisce piu' ipotesi. "Jarvis" e' un nome inglese e il riconoscimento
+    italiano spesso lo storpia nella prima ipotesi ("Ehi ya"), ma lo azzecca in un'altra:
+    si preferisce la prima ipotesi che lo contiene, altrimenti la piu' probabile.
+    """
+    if not isinstance(risultato, dict):
+        return ""
+    ipotesi = [
+        a["transcript"] for a in risultato.get("alternative", [])
+        if isinstance(a, dict) and a.get("transcript")
+    ]
+    if not ipotesi:
+        return ""
+    for testo in ipotesi:
+        if rivolta_a_jarvis(testo):
+            if testo != ipotesi[0]:
+                print(f"[Scelta l'ipotesi con 'Jarvis' invece di: {ipotesi[0]}]")
+            return testo
+    if len(ipotesi) > 1:
+        print(f"[Altre ipotesi di Google: {' | '.join(ipotesi[1:4])}]")
+    return ipotesi[0]
 
 
 # ==========================================================================

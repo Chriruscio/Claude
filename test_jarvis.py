@@ -141,6 +141,22 @@ class TestFileApp(unittest.TestCase):
         self.assertFalse(jarvis._voce_app_valida('Finder" to do shell script "x'))
 
 
+class TestSceltaTrascrizione(unittest.TestCase):
+    def _r(self, *testi):
+        return {"alternative": [{"transcript": t} for t in testi], "final": True}
+
+    def test_preferisce_ipotesi_con_jarvis(self):
+        self.assertEqual(jarvis.scegli_trascrizione(self._r("Ehi ya", "Ehi Jarvis")), "Ehi Jarvis")
+
+    def test_senza_jarvis_prende_la_prima(self):
+        self.assertEqual(jarvis.scegli_trascrizione(self._r("apri Chrome", "a pri crom")), "apri Chrome")
+
+    def test_risultati_vuoti(self):
+        for vuoto in [[], {}, {"alternative": []}, None]:
+            with self.subTest(vuoto=vuoto):
+                self.assertEqual(jarvis.scegli_trascrizione(vuoto), "")
+
+
 class TestStatoSistema(unittest.TestCase):
     def test_giorno_della_settimana(self):
         from datetime import datetime
