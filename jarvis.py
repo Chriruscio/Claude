@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
 """
-J.A.R.V.I.S. - assistente vocale per macOS con controllo del sistema.
+J.A.R.V.I.S. - assistente vocale per macOS e Windows con controllo del sistema.
 
 Il modello NON esegue comandi arbitrari: puo' solo invocare gli strumenti
-dichiarati in TOOLS_LOCALI, e la scrittura file e' confinata a una sandbox.
+dichiarati in TOOLS_LOCALI, e lettura e scrittura file sono confinate a una sandbox.
 
-Requisiti:
+Requisiti macOS:
     brew install portaudio
     pip install anthropic SpeechRecognition pyaudio
     export ANTHROPIC_API_KEY="sk-ant-..."
 
+Requisiti Windows (PowerShell):
+    pip install anthropic SpeechRecognition pyaudio
+    setx ANTHROPIC_API_KEY "sk-ant-..."     (poi riaprire il terminale)
+
 Avvio:
-    python3 jarvis.py
+    python3 jarvis.py        (macOS)
+    py jarvis.py             (Windows)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import platform
+import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -38,14 +46,19 @@ except ImportError:
 # CONFIGURAZIONE
 # ==========================================================================
 
+SISTEMA = platform.system()   # "Darwin" (macOS) oppure "Windows"
+IS_MAC = SISTEMA == "Darwin"
+IS_WIN = SISTEMA == "Windows"
+
 MODEL = os.environ.get("JARVIS_MODEL", "claude-haiku-4-5-20251001")
-VOICE = os.environ.get("JARVIS_VOICE", "Alice")
-SPEECH_RATE = int(os.environ.get("JARVIS_RATE", "190"))
+VOICE = os.environ.get("JARVIS_VOICE", "Alice")                 # solo macOS
+SPEECH_RATE = int(os.environ.get("JARVIS_RATE", "190"))         # macOS: parole al minuto
+SPEECH_RATE_WIN = int(os.environ.get("JARVIS_RATE_WIN", "1"))   # Windows: da -10 a 10
 STT_LANG = "it-IT"
 
 MAX_TOKENS = 1024
 MAX_SCAMBI = 6                # scambi completi tenuti in memoria
-MAX_RICERCHE_WEB = 3          # tetto per richiesta: ogni ricerca costa ~0,01 $
+MAX_RICERCHE_WEB = 3          # tetto per richiesta: ogni ricerca costa ~0,01 $ piu' i token dei risultati
 MAX_GIRI_TOOL = 6             # anti-loop sul ciclo di tool use
 LISTEN_TIMEOUT = 6
 PHRASE_TIME_LIMIT = 15
@@ -55,14 +68,16 @@ WORKSPACE = Path(
     os.environ.get("JARVIS_WORKSPACE", str(Path.home() / "Jarvis" / "workspace"))
 ).expanduser()
 
+NOME_MACCHINA = "MacBook" if IS_MAC else "PC Windows"
+
 SYSTEM_PROMPT = (
-    "Sei J.A.R.V.I.S., l'intelligenza artificiale integrata nel MacBook di Christian. "
+    f"Sei J.A.R.V.I.S., l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian. "
     "Rispondi sempre in italiano, con tono formale, efficiente e leggermente sarcastico "
     "ma sempre rispettoso, rivolgendoti all'utente come 'Signore'.\n\n"
     "Le tue risposte vengono lette ad alta voce da un sintetizzatore vocale. Quindi: "
     "massimo tre frasi, prosa continua, niente elenchi puntati, niente markdown, "
     "niente emoji, niente URL letti per esteso (di' 'secondo il sito X'), niente codice.\n\n"
-    "Hai a disposizione degli strumenti per agire sul Mac. Usali quando servono, "
+    f"Hai a disposizione degli strumenti per agire sul {NOME_MACCHINA}. Usali quando servono, "
     "senza chiedere conferma per azioni innocue come aprire un'app o leggere un file. "
     "Chiedi conferma a voce prima di sovrascrivere un file gia' esistente.\n\n"
     "Puoi cercare sul web quando la domanda riguarda fatti attuali o che non conosci. "
@@ -76,10 +91,51 @@ class Spegnimento(Exception):
 
 
 # ==========================================================================
-# SINTESI VOCALE (comando nativo macOS 'say')
+# POWERSHELL (solo Windows)
+# Gli script sono costanti: i dati variabili passano da variabili d'ambiente,
+# mai interpolati nel testo dello script.
 # ==========================================================================
 
-def _voce_installata(nome: str) -> bool:
+PS_VOCE_ITALIANA = (
+    "Add-Type -AssemblyName System.Speech; "
+    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+    "$v = $s.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -eq 'it-IT' } "
+    "| Select-Object -First 1; "
+    "if ($v) { $v.VoiceInfo.Name }"
+)
+
+PS_PARLA = (
+    "$ErrorActionPreference = 'Stop'; "
+    "Add-Type -AssemblyName System.Speech; "
+    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+    "if ($env:JARVIS_VOCE_WIN) { $s.SelectVoice($env:JARVIS_VOCE_WIN) }; "
+    "$s.Rate = [int]$env:JARVIS_RATE_WIN; "
+    "$s.Speak($env:JARVIS_TESTO)"
+)
+
+PS_BATTERIA = (
+    "$b = Get-CimInstance Win32_Battery; "
+    "if ($b) { \"$($b.EstimatedChargeRemaining)% (stato $($b.BatteryStatus))\" } "
+    "else { 'nessuna batteria rilevata (PC fisso?)' }"
+)
+
+
+def _powershell(script: str, env_extra: dict | None = None, timeout: int = 30):
+    env = dict(os.environ)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, errors="replace", timeout=timeout, env=env,
+    )
+
+
+# ==========================================================================
+# SINTESI VOCALE
+# macOS: comando nativo 'say'. Windows: sintetizzatore di sistema via PowerShell.
+# ==========================================================================
+
+def _voce_mac_installata(nome: str) -> bool:
     try:
         out = subprocess.run(["say", "-v", "?"], capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.SubprocessError):
@@ -89,7 +145,17 @@ def _voce_installata(nome: str) -> bool:
     return any(riga.startswith(nome + " ") for riga in out.stdout.splitlines())
 
 
-VOCE_OK = _voce_installata(VOICE)
+def _voce_windows_italiana() -> str:
+    """Nome della prima voce italiana installata su Windows, stringa vuota se assente."""
+    try:
+        out = _powershell(PS_VOCE_ITALIANA, timeout=20)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+VOCE_OK = _voce_mac_installata(VOICE) if IS_MAC else False
+VOCE_WIN = _voce_windows_italiana() if IS_WIN else ""
 
 
 def parla(testo: str) -> None:
@@ -97,12 +163,25 @@ def parla(testo: str) -> None:
     if not testo:
         return
     print(f"\nJ.A.R.V.I.S.: {testo}")
-    cmd = ["say", "-r", str(SPEECH_RATE)]
-    if VOCE_OK:
-        cmd += ["-v", VOICE]
-    cmd.append(testo)
     try:
-        subprocess.run(cmd, timeout=180)
+        if IS_MAC:
+            cmd = ["say", "-r", str(SPEECH_RATE)]
+            if VOCE_OK:
+                cmd += ["-v", VOICE]
+            cmd.append(testo)
+            subprocess.run(cmd, timeout=180)
+        elif IS_WIN:
+            esito = _powershell(
+                PS_PARLA,
+                env_extra={
+                    "JARVIS_TESTO": testo,
+                    "JARVIS_VOCE_WIN": VOCE_WIN,
+                    "JARVIS_RATE_WIN": str(SPEECH_RATE_WIN),
+                },
+                timeout=180,
+            )
+            if esito.returncode != 0:
+                print(f"[Sintesi vocale fallita: {esito.stderr.strip()[:300]}]")
     except FileNotFoundError:
         pass
     except subprocess.SubprocessError as e:
@@ -121,12 +200,19 @@ class Orecchie:
         try:
             self.mic = sr.Microphone()
         except (OSError, AttributeError) as e:
-            sys.exit(
-                f"Microfono non disponibile ({e}).\n"
-                "Su macOS serve: brew install portaudio && pip install --force-reinstall pyaudio\n"
-                "piu' il permesso Microfono per il Terminale in "
-                "Impostazioni > Privacy e sicurezza."
-            )
+            if IS_MAC:
+                aiuto = (
+                    "Su macOS serve: brew install portaudio && pip install --force-reinstall pyaudio\n"
+                    "piu' il permesso Microfono per il Terminale in "
+                    "Impostazioni > Privacy e sicurezza."
+                )
+            else:
+                aiuto = (
+                    "Su Windows serve: pip install pyaudio\n"
+                    "piu' l'accesso al microfono per le app desktop in "
+                    "Impostazioni > Privacy e sicurezza > Microfono."
+                )
+            sys.exit(f"Microfono non disponibile ({e}).\n{aiuto}")
         print("[Calibrazione del rumore ambientale, un secondo di silenzio...]")
         with self.mic as source:
             self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
@@ -156,7 +242,8 @@ class Orecchie:
 # WHITELIST APPLICAZIONI
 # ==========================================================================
 
-APP_CONSENTITE = {
+# macOS: nome parlato -> nome applicazione per 'open -a' e AppleScript.
+APP_MAC = {
     "safari": "Safari",
     "chrome": "Google Chrome",
     "terminale": "Terminal",
@@ -173,33 +260,53 @@ APP_CONSENTITE = {
     "impostazioni": "System Settings",
 }
 
+# Windows: nome parlato -> (cosa aprire, processo da chiudere).
+# Processo None = l'app si apre ma non si chiude da voce.
+APP_WIN = {
+    "chrome": ("chrome.exe", "chrome.exe"),
+    "edge": ("msedge.exe", "msedge.exe"),
+    "esplora risorse": ("explorer.exe", None),   # chiuderlo farebbe sparire la barra delle applicazioni
+    "blocco note": ("notepad.exe", "notepad.exe"),
+    "calcolatrice": ("calculator:", "CalculatorApp.exe"),
+    "terminale": ("wt.exe", "WindowsTerminal.exe"),
+    "word": ("winword.exe", "WINWORD.EXE"),
+    "excel": ("excel.exe", "EXCEL.EXE"),
+    "outlook": ("outlook.exe", "OUTLOOK.EXE"),
+    "spotify": ("spotify:", "Spotify.exe"),
+    "impostazioni": ("ms-settings:", "SystemSettings.exe"),
+}
+
+APP_CONSENTITE = APP_WIN if IS_WIN else APP_MAC
+
 
 # ==========================================================================
 # SANDBOX FILE
 # ==========================================================================
 
-ESTENSIONI_VIETATE = {
-    ".command", ".sh", ".bash", ".zsh", ".app", ".scpt",
-    ".py", ".pl", ".rb", ".plist", ".dylib", ".pkg", ".dmg",
-}
+# Lista bianca: tutto cio' che non e' qui viene rifiutato, eseguibili compresi.
+ESTENSIONI_CONSENTITE = {".txt", ".md", ".csv", ".json", ".log"}
 
 
-def _percorso_sicuro(nome_file: str) -> Path:
-    """Risolve un nome file dentro la sandbox, rifiutando ogni fuga."""
-    nome_file = (nome_file or "").strip()
-    if not nome_file:
+def _percorso_sicuro(nome: str, cartella: bool = False) -> Path:
+    """Risolve un nome dentro la sandbox, rifiutando ogni fuga."""
+    nome = (nome or "").strip()
+    if not nome:
         raise ValueError("Nome file vuoto.")
-    if Path(nome_file).is_absolute():
+    if ":" in nome:
+        # Su Windows 'C:file' e 'file.txt:flusso' sono percorsi insidiosi.
+        raise ValueError("Il carattere ':' non e' consentito nei nomi.")
+    if Path(nome).is_absolute() or nome.startswith(("/", "\\")):
         raise ValueError("I percorsi assoluti non sono consentiti.")
-    if ".." in Path(nome_file).parts:
+    if ".." in Path(nome).parts:
         raise ValueError("I riferimenti alla cartella superiore non sono consentiti.")
 
     radice = WORKSPACE.resolve()
-    candidato = (radice / nome_file).resolve()
+    candidato = (radice / nome).resolve()   # resolve() segue anche i collegamenti simbolici
     if candidato == radice or radice not in candidato.parents:
         raise ValueError("Percorso fuori dalla cartella di lavoro consentita.")
-    if candidato.suffix.lower() in ESTENSIONI_VIETATE:
-        raise ValueError(f"Estensione {candidato.suffix} non consentita.")
+    if not cartella and candidato.suffix.lower() not in ESTENSIONI_CONSENTITE:
+        consentite = ", ".join(sorted(ESTENSIONI_CONSENTITE))
+        raise ValueError(f"Estensione '{candidato.suffix}' non consentita. Ammesse: {consentite}.")
     return candidato
 
 
@@ -208,29 +315,50 @@ def _percorso_sicuro(nome_file: str) -> Path:
 # ==========================================================================
 
 def tool_apri_app(nome: str) -> str:
-    app = APP_CONSENTITE.get((nome or "").lower())
-    if not app:
+    chiave = (nome or "").lower()
+    if chiave not in APP_CONSENTITE:
         return f"App '{nome}' non presente nella whitelist."
-    esito = subprocess.run(["open", "-a", app], capture_output=True, text=True, timeout=20)
-    if esito.returncode == 0:
-        return f"{app} aperta."
-    return f"Impossibile aprire {app}: {esito.stderr.strip() or 'app non installata'}"
+    if IS_MAC:
+        app = APP_MAC[chiave]
+        esito = subprocess.run(["open", "-a", app], capture_output=True, text=True, timeout=20)
+        if esito.returncode == 0:
+            return f"{app} aperta."
+        return f"Impossibile aprire {app}: {esito.stderr.strip() or 'app non installata'}"
+    bersaglio, _ = APP_WIN[chiave]
+    try:
+        os.startfile(bersaglio)  # solo Windows; il bersaglio viene dal dizionario, non dal modello
+    except OSError as e:
+        return f"Impossibile aprire {chiave}: {e}. Forse non e' installata."
+    return f"{chiave} aperta."
 
 
 def tool_chiudi_app(nome: str) -> str:
-    app = APP_CONSENTITE.get((nome or "").lower())
-    if not app:
+    chiave = (nome or "").lower()
+    if chiave not in APP_CONSENTITE:
         return f"App '{nome}' non presente nella whitelist."
+    if IS_MAC:
+        app = APP_MAC[chiave]
+        esito = subprocess.run(
+            ["osascript", "-e", f'tell application "{app}" to quit'],
+            capture_output=True, text=True, timeout=30,
+        )
+        if esito.returncode == 0:
+            return f"{app} chiusa."
+        return (
+            f"Impossibile chiudere {app}: {esito.stderr.strip()}. "
+            "Potrebbe servire il permesso Automazione in Impostazioni > Privacy e sicurezza."
+        )
+    _, processo = APP_WIN[chiave]
+    if processo is None:
+        return f"{chiave} non si puo' chiudere da comando vocale."
+    # Senza /F: chiusura gentile, l'app puo' chiedere di salvare. Niente chiusure forzate.
     esito = subprocess.run(
-        ["osascript", "-e", f'tell application "{app}" to quit'],
-        capture_output=True, text=True, timeout=30,
+        ["taskkill", "/IM", processo],
+        capture_output=True, text=True, errors="replace", timeout=30,
     )
     if esito.returncode == 0:
-        return f"{app} chiusa."
-    return (
-        f"Impossibile chiudere {app}: {esito.stderr.strip()}. "
-        "Potrebbe servire il permesso Automazione in Impostazioni > Privacy e sicurezza."
-    )
+        return f"{chiave} chiusa."
+    return f"Impossibile chiudere {chiave}: {(esito.stderr or esito.stdout).strip()}"
 
 
 def tool_scrivi_file(nome_file: str, contenuto: str, modalita: str = "sovrascrivi") -> str:
@@ -250,7 +378,7 @@ def tool_scrivi_file(nome_file: str, contenuto: str, modalita: str = "sovrascriv
         return f"Errore di scrittura: {e}"
     azione = "aggiornato" if esisteva else "creato"
     relativo = percorso.relative_to(WORKSPACE.resolve())
-    return f"File {azione}: {relativo} ({percorso.stat().st_size} byte)"
+    return f"File {azione}: {relativo.as_posix()} ({percorso.stat().st_size} byte)"
 
 
 def tool_leggi_file(nome_file: str) -> str:
@@ -273,7 +401,7 @@ def tool_elenca_file(sottocartella: str = "") -> str:
     base = WORKSPACE.resolve()
     if sottocartella:
         try:
-            base = _percorso_sicuro(sottocartella)
+            base = _percorso_sicuro(sottocartella, cartella=True)
         except ValueError as e:
             return f"Rifiutato: {e}"
     if not base.is_dir():
@@ -282,22 +410,36 @@ def tool_elenca_file(sottocartella: str = "") -> str:
     return "\n".join(voci) if voci else "(cartella vuota)"
 
 
+def _batteria() -> str:
+    if IS_MAC:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=10)
+        return out.stdout.strip().replace("\n", " ")
+    if IS_WIN:
+        out = _powershell(PS_BATTERIA, timeout=20)
+        return out.stdout.strip() or out.stderr.strip()
+    return "n/d su questo sistema"
+
+
+def _disco() -> str:
+    radice = Path.home().anchor or "/"
+    uso = shutil.disk_usage(radice)
+    gb = 1024 ** 3
+    return f"{uso.free / gb:.0f} GB liberi su {uso.total / gb:.0f} GB ({radice})"
+
+
 def tool_stato_sistema(cosa: str = "tutto") -> str:
     pezzi = []
     if cosa in ("ora", "tutto"):
         pezzi.append(f"Data e ora: {datetime.now():%d/%m/%Y %H:%M}")
     if cosa in ("batteria", "tutto"):
         try:
-            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=10)
-            pezzi.append("Batteria: " + out.stdout.strip().replace("\n", " "))
+            pezzi.append("Batteria: " + _batteria())
         except (FileNotFoundError, subprocess.SubprocessError) as e:
             pezzi.append(f"Batteria non leggibile: {e}")
     if cosa in ("disco", "tutto"):
         try:
-            out = subprocess.run(["df", "-h", "/"], capture_output=True, text=True, timeout=10)
-            righe = out.stdout.strip().splitlines()
-            pezzi.append("Disco: " + (" ".join(righe[-1].split()) if len(righe) > 1 else "n/d"))
-        except (FileNotFoundError, subprocess.SubprocessError) as e:
+            pezzi.append("Disco: " + _disco())
+        except OSError as e:
             pezzi.append(f"Disco non leggibile: {e}")
     return "\n".join(pezzi) or "Nessun dato richiesto."
 
@@ -312,11 +454,12 @@ ESECUTORI = {
 }
 
 _NOMI_APP = sorted(APP_CONSENTITE.keys())
+_ESTENSIONI = ", ".join(sorted(ESTENSIONI_CONSENTITE))
 
 TOOLS_LOCALI = [
     {
         "name": "apri_app",
-        "description": "Apre un'applicazione sul Mac. Solo le app in whitelist.",
+        "description": f"Apre un'applicazione sul {NOME_MACCHINA}. Solo le app in whitelist.",
         "input_schema": {
             "type": "object",
             "properties": {"nome": {"type": "string", "enum": _NOMI_APP}},
@@ -325,7 +468,7 @@ TOOLS_LOCALI = [
     },
     {
         "name": "chiudi_app",
-        "description": "Chiude un'applicazione aperta sul Mac. Solo le app in whitelist.",
+        "description": f"Chiude un'applicazione aperta sul {NOME_MACCHINA}. Solo le app in whitelist.",
         "input_schema": {
             "type": "object",
             "properties": {"nome": {"type": "string", "enum": _NOMI_APP}},
@@ -336,7 +479,8 @@ TOOLS_LOCALI = [
         "name": "scrivi_file",
         "description": (
             "Crea o modifica un file di testo nella cartella di lavoro dell'utente. "
-            "Usa percorsi relativi, es. 'note/spesa.md'. Non puo' scrivere altrove."
+            f"Usa percorsi relativi, es. 'note/spesa.md'. Estensioni ammesse: {_ESTENSIONI}. "
+            "Non puo' scrivere altrove."
         ),
         "input_schema": {
             "type": "object",
@@ -415,6 +559,7 @@ def _archivia(scambi: list[list[dict]], scambio: list[dict]) -> None:
 def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
     """Un turno completo: puo' includere piu' giri di tool use."""
     scambio: list[dict] = [{"role": "user", "content": domanda}]
+    in_pausa = False
 
     for _ in range(MAX_GIRI_TOOL):
         try:
@@ -441,17 +586,34 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
         if uso and getattr(uso, "web_search_requests", 0):
             print(f"[Ricerche web effettuate: {uso.web_search_requests}]")
 
-        scambio.append({"role": "assistant", "content": risposta.content})
+        contenuto = list(risposta.content)
+        if in_pausa:
+            # Il server riprende da dove si era fermato: e' lo stesso messaggio dell'assistente.
+            scambio[-1]["content"] = list(scambio[-1]["content"]) + contenuto
+        else:
+            scambio.append({"role": "assistant", "content": contenuto})
+        in_pausa = False
+
+        if risposta.stop_reason == "pause_turn":
+            # La ricerca web lato server non ha finito: si rimanda la conversazione cosi' com'e'.
+            in_pausa = True
+            continue
 
         if risposta.stop_reason != "tool_use":
+            if risposta.stop_reason == "max_tokens":
+                # Risposta troncata: un blocco strumento a meta' renderebbe invalida la memoria.
+                scambio[-1]["content"] = [
+                    b for b in scambio[-1]["content"] if getattr(b, "type", "") == "text"
+                ]
             testo = "".join(
-                b.text for b in risposta.content if getattr(b, "type", "") == "text"
+                b.text for b in scambio[-1]["content"] if getattr(b, "type", "") == "text"
             ).strip()
-            _archivia(scambi, scambio)
+            if scambio[-1]["content"]:
+                _archivia(scambi, scambio)
             return testo or "Non ho prodotto alcuna risposta, Signore."
 
         risultati = []
-        for blocco in risposta.content:
+        for blocco in contenuto:
             if getattr(blocco, "type", "") != "tool_use":
                 continue
             print(f"[Strumento] {blocco.name} {json.dumps(blocco.input, ensure_ascii=False)}")
@@ -470,14 +632,25 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
 # COMANDI GESTITI SENZA API
 # ==========================================================================
 
-PAROLE_USCITA = ("spegniti", "spegnimento", "arrivederci", "esci", "termina sessione")
+# La frase deve essere SOLO il comando: "esci" dentro "riesci ad aprire Safari?"
+# o "esci da Word" non deve spegnere J.A.R.V.I.S.
+COMANDI_USCITA = {
+    "spegniti", "spegnimento", "arrivederci", "esci", "termina sessione", "termina la sessione",
+}
+COMANDI_AZZERA = {"dimentica tutto", "azzera la memoria"}
+PAROLE_DI_CORTESIA = {"jarvis", "giarvis", "per", "favore", "grazie"}
+
+
+def _normalizza(frase: str) -> str:
+    parole = re.findall(r"\w+", frase.lower())
+    return " ".join(p for p in parole if p not in PAROLE_DI_CORTESIA)
 
 
 def comando_locale(frase: str, scambi: list) -> bool:
-    testo = frase.lower().strip()
-    if any(p in testo for p in PAROLE_USCITA):
+    testo = _normalizza(frase)
+    if testo in COMANDI_USCITA:
         raise Spegnimento
-    if "dimentica tutto" in testo or "azzera la memoria" in testo:
+    if testo in COMANDI_AZZERA:
         scambi.clear()
         parla("Memoria della conversazione azzerata, Signore.")
         return True
@@ -489,11 +662,15 @@ def comando_locale(frase: str, scambi: list) -> bool:
 # ==========================================================================
 
 def main() -> None:
+    if not (IS_MAC or IS_WIN):
+        sys.exit(f"Sistema '{SISTEMA}' non supportato: J.A.R.V.I.S. gira su macOS e Windows.")
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit(
-            "ANTHROPIC_API_KEY non impostata.\n"
-            'Esegui:  export ANTHROPIC_API_KEY="sk-ant-..."'
-        )
+        if IS_WIN:
+            aiuto = 'Esegui:  setx ANTHROPIC_API_KEY "sk-ant-..."   e poi riapri il terminale.'
+        else:
+            aiuto = 'Esegui:  export ANTHROPIC_API_KEY="sk-ant-..."'
+        sys.exit(f"ANTHROPIC_API_KEY non impostata.\n{aiuto}")
 
     WORKSPACE.mkdir(parents=True, exist_ok=True)
 
@@ -501,8 +678,14 @@ def main() -> None:
     orecchie = Orecchie()
     scambi: list[list[dict]] = []
 
+    if IS_MAC:
+        voce = VOICE if VOCE_OK else "predefinita di sistema"
+    else:
+        voce = VOCE_WIN or "predefinita di sistema (nessuna voce italiana installata)"
+
+    print(f"[Sistema: {NOME_MACCHINA}]")
     print(f"[Modello: {MODEL}]")
-    print(f"[Voce: {VOICE if VOCE_OK else 'predefinita di sistema'}]")
+    print(f"[Voce: {voce}]")
     print(f"[Cartella di lavoro: {WORKSPACE}]")
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
     parla("Sistemi online. J.A.R.V.I.S. operativo, Signore.")
