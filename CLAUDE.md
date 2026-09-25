@@ -1,10 +1,11 @@
 # J.A.R.V.I.S. — contesto del progetto
 
 ## 1. Cos'è
-Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolta dal microfono, risponde con voce sintetica e agisce sul computer tramite strumenti dichiarati (apre e chiude app, legge e scrive file, legge lo stato del sistema, cerca sul web). Due istanze indipendenti, una per macchina, dallo stesso sorgente.
+Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolta dal microfono, risponde con voce sintetica e agisce sul computer tramite strumenti dichiarati (apre e chiude app, legge e scrive file, legge lo stato del sistema, cerca sul web). Due istanze indipendenti, una per macchina, dallo stesso sorgente. Una pagina web locale (HUD) mostra lo stato di J.A.R.V.I.S. e la conversazione.
 
 ## 2. File coinvolti
 - `jarvis.py` — unico file del programma. Contiene configurazione, rilevamento del sistema operativo, sintesi vocale, ascolto microfonico, whitelist applicazioni (una per sistema), sandbox dei file, implementazione degli strumenti, ciclo di dialogo con l'API e loop principale.
+- `hud.html` — la pagina dell'HUD (reattore animato, stato, ultime 6 battute). Legge `/stato` ogni 300 ms e inserisce i testi solo con `textContent`.
 - `app_windows.json` / `app_mac.json` (facoltativi, non versionati) — elenco personale di app, accanto a `jarvis.py`. Si aggiunge all'elenco di base e ne sostituisce le voci con lo stesso nome. Se il file ha errori, J.A.R.V.I.S. lo segnala all'avvio e usa solo l'elenco di base. Esempio da copiare: `app_windows.esempio.json`.
 - `test_jarvis.py` — test della logica indipendente dall'hardware (sandbox, comandi locali, ciclo di dialogo con client finto). `python3 -m unittest test_jarvis -v`.
 
@@ -18,13 +19,17 @@ Filtro di attenzione:
 
 Avvio senza finestre (Windows: `pyw -3.13 jarvis.py`): con `pythonw` stdout e stderr non esistono, quindi vengono rediretti su `~/Jarvis/jarvis.log` (azzerato all'avvio oltre 1 MB) prima di ogni import che può fallire. I processi figli (PowerShell, `taskkill`) partono con `CREATE_NO_WINDOW`. Un errore all'avvio viene annunciato a voce. Un file di blocco (`~/Jarvis/jarvis.lock`) impedisce due istanze contemporanee.
 
+HUD: all'avvio parte in sottofondo un server HTTP su `127.0.0.1:8765` (`JARVIS_HUD_PORTA`; `JARVIS_HUD=0` per disattivarlo; se la porta è occupata J.A.R.V.I.S. continua senza). Stati: `avvio`, `ascolto`, `attento` (finestra di 8 s), `elaborazione` (con il nome dello strumento), `parla`, `dorme`, `spento`; la pagina mostra `offline` se il server non risponde. "Ehi Jarvis" e "Jarvis, svegliati" aprono la pagina solo se non è già collegata (nessuna richiesta negli ultimi 2 s); su Windows in Edge modalità app (finestra senza barre), altrimenti nel browser predefinito.
+
 Differenze per sistema (scelte in base a `platform.system()`):
 - Voce: macOS `say`; Windows sintetizzatore di sistema (System.Speech) tramite PowerShell, con la prima voce italiana installata.
 - App: macOS `open -a` e `osascript ... quit`; Windows `os.startfile` e `taskkill /IM` senza `/F` (chiusura gentile).
 - Batteria: macOS `pmset`; Windows `Win32_Battery` via PowerShell. Disco: `shutil.disk_usage` su entrambi.
 
 ## 4. Comunicazione con altri componenti
-Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e il PC o con altri processi. Le uniche comunicazioni esterne sono HTTPS verso l'API Anthropic e verso il servizio di trascrizione Google usato da SpeechRecognition.
+Nessun collegamento tra il Mac e il PC. Le comunicazioni esterne sono HTTPS verso l'API Anthropic e verso il servizio di trascrizione Google usato da SpeechRecognition.
+
+L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e `GET /stato` (ogni altro metodo risponde 501), nessuna richiesta può comandare J.A.R.V.I.S. Rifiuta con 403 ogni header `Host` diverso da `127.0.0.1:<porta>` o `localhost:<porta>` (difesa dal DNS rebinding) e non invia intestazioni CORS, quindi i siti aperti nel browser non possono leggere la conversazione. La pagina ha una Content-Security-Policy che vieta risorse esterne.
 
 ## 5. Decisioni prese e perché
 - Modello `claude-haiku-4-5-20251001`: scelto per latenza e costo; supporta il web search nella variante `web_search_20250305` (le varianti più recenti richiedono modelli più grandi).
@@ -47,6 +52,8 @@ Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e
 - Non reintrodurre pyttsx3, né la chiave API nel sorgente.
 - Non rimuovere i controlli su percorsi assoluti, `..`, `:` e il confronto dopo `resolve()` nella sandbox.
 - Non tornare a una lista nera di estensioni.
+- Non aggiungere all'HUD endpoint che modificano lo stato o eseguono azioni, né intestazioni CORS; non metterlo in ascolto su un indirizzo diverso da `127.0.0.1`; non togliere il controllo sull'header `Host`.
+- Non inserire nella pagina testi della conversazione con `innerHTML`: arrivano dal modello e dal web.
 - Non mettere il file dell'elenco app dentro la sandbox, né dare al modello uno strumento per modificarlo.
 - Non dare a J.A.R.V.I.S. accesso in scrittura al proprio codice.
 - Non lanciare processi figli su Windows senza `creationflags=SENZA_FINESTRA`.
@@ -60,4 +67,5 @@ Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e
 - Permessi macOS non ancora concessi: Microfono per il Terminale, Automazione per `chiudi_app`.
 - Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
 - Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
+- HUD verificato solo su Linux (Chromium headless, schermate desktop e telefono). Mai aperto su Windows né in Edge modalità app.
 - Mai eseguite finora: chiamate API reali (su entrambi i sistemi) e tutto il lato Mac.

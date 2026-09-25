@@ -4,8 +4,11 @@ Test della logica di J.A.R.V.I.S. che non richiede microfono, voce o API reale.
 Avvio:  python3 -m unittest test_jarvis -v      (Windows: py -m unittest test_jarvis -v)
 """
 
+import http.client
+import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +220,60 @@ class TestUnicaIstanza(unittest.TestCase):
                 primo.close()
             finally:
                 jarvis.CARTELLA_JARVIS = originale
+
+
+class TestServerHud(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = jarvis._crea_server_hud(0)   # porta libera qualsiasi
+        cls.porta = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _richiesta(self, metodo, percorso, host=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.porta, timeout=5)
+        c.putrequest(metodo, percorso, skip_host=True)
+        c.putheader("Host", host or f"127.0.0.1:{self.porta}")
+        c.endheaders()
+        r = c.getresponse()
+        corpo = r.read()
+        c.close()
+        return r, corpo
+
+    def test_pagina(self):
+        r, corpo = self._richiesta("GET", "/")
+        self.assertEqual(r.status, 200)
+        self.assertIn(b"J.A.R.V.I.S.", corpo)
+        self.assertIn("default-src 'none'", r.getheader("Content-Security-Policy"))
+
+    def test_stato(self):
+        jarvis.HUD.imposta("parla", "prova")
+        r, corpo = self._richiesta("GET", "/stato")
+        self.assertEqual(r.status, 200)
+        dati = json.loads(corpo)
+        self.assertEqual((dati["stato"], dati["dettaglio"]), ("parla", "prova"))
+        self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
+
+    def test_host_estraneo_rifiutato(self):
+        # Difesa dal DNS rebinding: un sito esterno che punta a 127.0.0.1 ha un Host diverso.
+        for host in ["sito-malevolo.com", f"sito-malevolo.com:{self.porta}", "127.0.0.1:1"]:
+            with self.subTest(host=host):
+                r, _ = self._richiesta("GET", "/stato", host=host)
+                self.assertEqual(r.status, 403)
+
+    def test_solo_lettura(self):
+        for metodo in ["POST", "PUT", "DELETE"]:
+            with self.subTest(metodo=metodo):
+                r, _ = self._richiesta(metodo, "/stato")
+                self.assertEqual(r.status, 501)
+
+    def test_percorso_sconosciuto(self):
+        r, _ = self._richiesta("GET", "/../jarvis.py")
+        self.assertEqual(r.status, 404)
 
 
 class TestCicloDialogo(unittest.TestCase):

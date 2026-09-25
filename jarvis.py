@@ -29,8 +29,12 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import webbrowser
+from collections import deque
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -82,6 +86,10 @@ MAX_RICERCHE_WEB = 3          # tetto per richiesta: ogni ricerca costa ~0,01 $ 
 MAX_GIRI_TOOL = 6             # anti-loop sul ciclo di tool use
 LISTEN_TIMEOUT = 6
 FINESTRA_ASCOLTO = 8          # secondi, dopo una risposta, in cui non serve dire "Jarvis"
+
+HUD_ATTIVO = os.environ.get("JARVIS_HUD", "1") != "0"
+HUD_PORTA = int(os.environ.get("JARVIS_HUD_PORTA", "8765"))
+FILE_HUD = Path(__file__).resolve().parent / "hud.html"
 PHRASE_TIME_LIMIT = 15
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
@@ -157,6 +165,124 @@ def _powershell(script: str, env_extra: dict | None = None, timeout: int = 30):
 
 
 # ==========================================================================
+# HUD: la "faccia" di J.A.R.V.I.S. in una pagina web locale
+# Il server e' SOLO IN LETTURA (nessuna richiesta puo' comandare J.A.R.V.I.S.),
+# ascolta solo su 127.0.0.1 e rifiuta ogni Host diverso da quello atteso,
+# cosi' un sito aperto nel browser non puo' leggerlo (DNS rebinding).
+# ==========================================================================
+
+class Hud:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.stato = "avvio"
+        self.dettaglio = ""
+        self.storico: deque = deque(maxlen=12)
+        self.versione = 0
+        self.ultimo_contatto = 0.0
+
+    def imposta(self, stato: str, dettaglio: str = "") -> None:
+        with self._lock:
+            self.stato, self.dettaglio = stato, dettaglio
+
+    def aggiungi(self, chi: str, testo: str) -> None:
+        with self._lock:
+            self.storico.append({"chi": chi, "testo": testo, "ora": f"{datetime.now():%H:%M}"})
+            self.versione += 1
+
+    def istantanea(self) -> dict:
+        with self._lock:
+            self.ultimo_contatto = time.monotonic()
+            return {
+                "stato": self.stato,
+                "dettaglio": self.dettaglio,
+                "storico": list(self.storico),
+                "versione": self.versione,
+            }
+
+    def pagina_aperta(self) -> bool:
+        with self._lock:
+            return time.monotonic() - self.ultimo_contatto < 2.0
+
+    def segna_apertura(self) -> None:
+        """Lascia alla pagina appena aperta qualche secondo per collegarsi, senza riaprirla."""
+        with self._lock:
+            self.ultimo_contatto = time.monotonic() + 5.0
+
+
+HUD = Hud()
+URL_HUD: str | None = None
+
+
+def _crea_server_hud(porta: int) -> ThreadingHTTPServer:
+    pagina = FILE_HUD.read_bytes()
+    politica = (
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+        "connect-src 'self'; img-src data:"
+    )
+
+    class Gestore(BaseHTTPRequestHandler):
+        def log_message(self, *argomenti) -> None:   # altrimenti una riga di registro ogni 300 ms
+            pass
+
+        def _rispondi(self, codice: int, corpo: bytes, tipo: str, extra: dict | None = None) -> None:
+            self.send_response(codice)
+            self.send_header("Content-Type", tipo)
+            self.send_header("Content-Length", str(len(corpo)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            for chiave, valore in (extra or {}).items():
+                self.send_header(chiave, valore)
+            self.end_headers()
+            self.wfile.write(corpo)
+
+        def do_GET(self) -> None:
+            porta_reale = self.server.server_address[1]
+            if self.headers.get("Host") not in (f"127.0.0.1:{porta_reale}", f"localhost:{porta_reale}"):
+                self._rispondi(403, b"Vietato", "text/plain; charset=utf-8")
+            elif self.path == "/":
+                self._rispondi(200, pagina, "text/html; charset=utf-8",
+                               {"Content-Security-Policy": politica})
+            elif self.path == "/stato":
+                corpo = json.dumps(HUD.istantanea(), ensure_ascii=False).encode("utf-8")
+                self._rispondi(200, corpo, "application/json; charset=utf-8")
+            else:
+                self._rispondi(404, b"Non trovato", "text/plain; charset=utf-8")
+
+    return ThreadingHTTPServer(("127.0.0.1", porta), Gestore)
+
+
+def avvia_hud() -> str | None:
+    """Avvia il server dell'HUD in sottofondo. Se non riesce, J.A.R.V.I.S. funziona lo stesso."""
+    if not HUD_ATTIVO:
+        return None
+    try:
+        server = _crea_server_hud(HUD_PORTA)
+    except OSError as e:
+        print(f"[HUD non disponibile ({e}): continuo senza]")
+        return None
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"[HUD: {url}]")
+    return url
+
+
+def apri_hud() -> None:
+    """Apre la pagina, ma solo se non e' gia' aperta: niente schede a decine."""
+    if not URL_HUD or HUD.pagina_aperta():
+        return
+    HUD.segna_apertura()
+    if IS_WIN:
+        # Edge in modalita' app: una finestra pulita, senza barra degli indirizzi ne' schede.
+        for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles")):
+            edge = Path(base or "") / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+            if base and edge.is_file():
+                subprocess.Popen([str(edge), f"--app={URL_HUD}"], creationflags=SENZA_FINESTRA)
+                return
+    webbrowser.open(URL_HUD)
+
+
+# ==========================================================================
 # SINTESI VOCALE
 # macOS: comando nativo 'say'. Windows: sintetizzatore di sistema via PowerShell.
 # ==========================================================================
@@ -189,6 +315,8 @@ def parla(testo: str) -> None:
     if not testo:
         return
     print(f"\nJ.A.R.V.I.S.: {testo}")
+    HUD.aggiungi("jarvis", testo)
+    HUD.imposta("parla")
     try:
         if IS_MAC:
             cmd = ["say", "-r", str(SPEECH_RATE)]
@@ -642,6 +770,7 @@ def _archivia(scambi: list[list[dict]], scambio: list[dict]) -> None:
 def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
     """Un turno completo: puo' includere piu' giri di tool use."""
     scambio: list[dict] = [{"role": "user", "content": domanda}]
+    HUD.imposta("elaborazione")
     in_pausa = False
 
     for _ in range(MAX_GIRI_TOOL):
@@ -700,6 +829,7 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
             if getattr(blocco, "type", "") != "tool_use":
                 continue
             print(f"[Strumento] {blocco.name} {json.dumps(blocco.input, ensure_ascii=False)}")
+            HUD.imposta("elaborazione", blocco.name.replace("_", " "))
             esito = esegui_tool(blocco.name, blocco.input)
             print(f"[Esito] {esito[:200]}")
             risultati.append(
@@ -841,6 +971,9 @@ def main() -> None:
 
     WORKSPACE.mkdir(parents=True, exist_ok=True)
 
+    global URL_HUD
+    URL_HUD = avvia_hud()
+
     client = anthropic.Anthropic()
     orecchie = Orecchie()
     scambi: list[list[dict]] = []
@@ -867,6 +1000,10 @@ def main() -> None:
             # In finestra si aspetta solo il tempo rimasto: una frase iniziata dopo
             # la scadenza non deve passare senza "Jarvis".
             attesa = max(1.0, attenzione.attivo_fino - ora) if in_finestra else None
+            if attenzione.dorme:
+                HUD.imposta("dorme")
+            else:
+                HUD.imposta("attento" if in_finestra else "ascolto")
             frase = orecchie.ascolta(attesa)
             if not frase:
                 if in_finestra:
@@ -877,18 +1014,23 @@ def main() -> None:
             if azione == "ignora":
                 print("[Ignorata: in pausa]" if attenzione.dorme else "[Ignorata: manca 'Jarvis']")
                 continue
+            HUD.aggiungi("utente", frase)
             if azione == "dormi":
                 parla("Entro in modalita' riposo, Signore. Mi chiami quando serve.")
                 continue
             if azione == "sveglia":
+                apri_hud()
                 parla("Di nuovo operativo, Signore.")
             elif azione == "attesa":
+                apri_hud()
                 parla("Si', Signore?")
             elif not comando_locale(frase, scambi):
                 parla(chiedi_a_claude(client, scambi, frase))
             attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
             parla("Disattivazione dei sistemi. Buona giornata, Signore.")
+            HUD.imposta("spento")
+            time.sleep(1.0)   # lascia alla pagina il tempo di mostrare lo spegnimento
             return
         except KeyboardInterrupt:
             print("\n[Interruzione manuale]")
