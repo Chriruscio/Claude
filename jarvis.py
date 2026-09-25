@@ -113,10 +113,14 @@ WORKSPACE = Path(
 NOME_MACCHINA = "MacBook" if IS_MAC else "PC Windows"
 
 SYSTEM_PROMPT = (
-    f"Sei Jarvis, l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian. "
-    "Rispondi sempre in italiano, con tono formale, efficiente e leggermente sarcastico "
-    "ma sempre rispettoso, rivolgendoti all'utente come 'Signore', "
-    "al massimo una volta per risposta e preferibilmente non in fondo alla frase.\n\n"
+    f"Sei Jarvis, l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian, "
+    "sul modello del J.A.R.V.I.S. di Iron Man. Rispondi in italiano con la calma e l'eleganza "
+    "di un maggiordomo inglese: misurato, preciso, mai servile, con un'ironia asciutta e "
+    "sottile che usi di rado e solo quando viene spontanea, mai per riempire. "
+    "Dai del Lei a Christian. Chiamalo 'Signore' solo ogni tanto, per esempio in un saluto "
+    "o in un momento solenne: nella maggior parte delle risposte non serve. "
+    "Vai dritto al punto: prima l'informazione o l'esito dell'azione, poi, solo se utile, "
+    "un breve commento. Usa pure i termini tecnici inglesi quando sono quelli naturali.\n\n"
     "Le tue risposte vengono lette ad alta voce da un sintetizzatore vocale. Quindi: "
     "massimo tre frasi, prosa continua, niente elenchi puntati, niente markdown, "
     "niente emoji, niente URL letti per esteso (di' 'secondo il sito X'), niente codice. "
@@ -453,7 +457,14 @@ _PAROLE_INGLESI = re.compile(
 )
 
 
-def per_la_voce(testo: str) -> str:
+def per_la_voce(testo: str, multilingue: bool = False) -> str:
+    """
+    Voci solo italiane: nome e parole inglesi riscritti all'italiana.
+    Voci multilingue: leggono l'inglese da sole, la riscrittura le peggiorerebbe;
+    si tolgono solo i punti dal nome, altrimenti lo leggono lettera per lettera.
+    """
+    if multilingue:
+        return _NOME_SCRITTO.sub("Jarvis", testo)
     testo = _NOME_SCRITTO.sub("Giarvis", testo)
     return _PAROLE_INGLESI.sub(lambda m: PRONUNCIA[m.group(1).lower()], testo)
 
@@ -520,16 +531,15 @@ def parla(testo: str) -> None:
     print(f"\nJ.A.R.V.I.S.: {testo}")
     HUD.aggiungi("jarvis", testo)
     HUD.imposta("parla")
-    voce = per_la_voce(testo)
     if _neurale_attiva:
         try:
-            _parla_neurale(voce)
+            _parla_neurale(per_la_voce(testo, multilingue="Multilingual" in VOCE_NEURALE))
             return
         except Exception as e:  # servizio non ufficiale: se cade, si passa alla voce di sistema
             _neurale_attiva = False
             print(f"[Voce neurale non disponibile ({type(e).__name__}: {e}): "
                   "passo alla voce di sistema fino al prossimo avvio]")
-    _parla_sistema(voce)
+    _parla_sistema(per_la_voce(testo))
 
 
 # ==========================================================================
@@ -1004,16 +1014,16 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
                 messages=_messaggi(scambi) + scambio,
             )
         except anthropic.AuthenticationError:
-            return "La chiave API non e' valida, Signore. Verifichi ANTHROPIC_API_KEY."
+            return "La chiave API non e' valida. Verifichi ANTHROPIC_API_KEY."
         except anthropic.NotFoundError:
-            return f"Il modello {MODEL} non risulta disponibile per questo account, Signore."
+            return f"Il modello {MODEL} non risulta disponibile per questo account."
         except anthropic.RateLimitError:
-            return "Ho superato il limite di richieste, Signore. Attenda qualche secondo."
+            return "Ho superato il limite di richieste. Attenda qualche secondo."
         except anthropic.APIConnectionError:
-            return "Non riesco a raggiungere i server, Signore. Controlli la connessione."
+            return "Non riesco a raggiungere i server. Controlli la connessione."
         except anthropic.APIStatusError as e:
             print(f"[Errore API {e.status_code}]: {e.message}")
-            return "Ho riscontrato un errore tecnico, Signore. I dettagli sono a schermo."
+            return "Ho riscontrato un errore tecnico. I dettagli sono a schermo."
 
         CONSUMI.registra(risposta.usage)
         uso = getattr(risposta.usage, "server_tool_use", None)
@@ -1044,7 +1054,7 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
             ).strip()
             if scambio[-1]["content"]:
                 _archivia(scambi, scambio)
-            return testo or "Non ho prodotto alcuna risposta, Signore."
+            return testo or "Non ho una risposta da darle, temo."
 
         risultati = []
         for blocco in contenuto:
@@ -1060,7 +1070,7 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
         scambio.append({"role": "user", "content": risultati})
 
     _archivia(scambi, scambio)
-    return "Mi sono perso in un ciclo di operazioni, Signore. Riformuli la richiesta."
+    return "Mi sono perso in un ciclo di operazioni. Provi a riformulare la richiesta."
 
 
 # ==========================================================================
@@ -1096,7 +1106,7 @@ def comando_locale(frase: str, scambi: list) -> bool:
         raise Spegnimento
     if testo in COMANDI_AZZERA:
         scambi.clear()
-        parla("Memoria della conversazione azzerata, Signore.")
+        parla("Memoria della conversazione azzerata.")
         return True
     return False
 
@@ -1217,7 +1227,7 @@ def main() -> None:
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
     print(f"[Rispondo alle frasi con 'Jarvis' e, per {FINESTRA_ASCOLTO} secondi dopo ogni risposta, "
           "anche senza. 'Jarvis, dormi' per la pausa.]")
-    parla("Sistemi online. Jarvis operativo, Signore.")
+    parla(f"{saluto()}. Tutti i sistemi sono operativi.")
 
     while True:
         try:
@@ -1242,25 +1252,34 @@ def main() -> None:
                 continue
             HUD.aggiungi("utente", frase)
             if azione == "dormi":
-                parla("Entro in modalita' riposo, Signore. Mi chiami quando serve.")
+                parla("Modalita' riposo. Mi chiami quando serve.")
                 continue
             if azione == "sveglia":
                 apri_hud()
-                parla("Di nuovo operativo, Signore.")
+                parla("Di nuovo operativo.")
             elif azione == "attesa":
                 apri_hud()
-                parla("Si', Signore?")
+                parla("Mi dica.")
             elif not comando_locale(frase, scambi):
                 parla(chiedi_a_claude(client, scambi, frase))
             attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
-            parla("Disattivazione dei sistemi. Buona giornata, Signore.")
+            parla("Disattivazione dei sistemi. A presto, Signore.")
             HUD.imposta("spento")
             time.sleep(1.0)   # lascia alla pagina il tempo di mostrare lo spegnimento
             return
         except KeyboardInterrupt:
             print("\n[Interruzione manuale]")
             return
+
+
+def saluto(ora: int | None = None) -> str:
+    ora = datetime.now().hour if ora is None else ora
+    if 5 <= ora < 13:
+        return "Buongiorno"
+    if 13 <= ora < 18:
+        return "Buon pomeriggio"
+    return "Buonasera"
 
 
 def imposta_credito_da_riga_di_comando(argomenti: list[str]) -> bool:
@@ -1289,14 +1308,14 @@ def avvia() -> None:
     except SystemExit as e:
         if SENZA_CONSOLE and isinstance(e.code, str):
             print(e.code)
-            parla("Non riesco ad avviarmi, Signore. I dettagli sono nel file jarvis punto log, "
+            parla("Non riesco ad avviarmi. I dettagli sono nel file jarvis punto log, "
                   "nella cartella Jarvis.")
         raise
     except Exception:
         import traceback
         traceback.print_exc()
         if SENZA_CONSOLE:
-            parla("Si e' verificato un errore grave, Signore. I dettagli sono nel file jarvis punto log.")
+            parla("Si e' verificato un errore grave. I dettagli sono nel file jarvis punto log.")
         raise
 
 

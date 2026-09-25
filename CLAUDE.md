@@ -39,7 +39,8 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - Chiave API letta da `ANTHROPIC_API_KEY`, mai scritta nel sorgente.
 - Il saldo reale della Console non è leggibile con una chiave API normale (servirebbe l'Admin API con chiave amministratore): il credito residuo nell'HUD è una stima e va riallineato con `--credito` guardando la Console.
 - Parole inglesi frequenti riscritte per la voce italiana (`PRONUNCIA`: "file" → "fàil" ecc.), perché nessuna voce maschile italiana disponibile le pronuncia all'inglese. Grafie da ritoccare a orecchio.
-- "Signore" al massimo una volta per risposta: ripetuto in ogni frase, e a fine frase, la voce lo enfatizzava troppo.
+- Personalità sul modello del J.A.R.V.I.S. di Iron Man: maggiordomo inglese calmo e misurato, ironia asciutta e rara, dritto al punto, del Lei. "Signore" solo ogni tanto (saluto, momenti solenni): ripetuto in ogni frase stancava e la voce lo enfatizzava troppo. Le frasi fisse (avvio con saluto in base all'ora, pausa, errori) non lo usano, tranne il congedo.
+- Con una voce neurale "Multilingual" non si applicano `PRONUNCIA` né "Giarvis": quelle voci leggono l'inglese da sole. La riscrittura resta per le voci solo italiane e per la voce di sistema di riserva.
 - Voce neurale Microsoft via `edge-tts` (`JARVIS_VOCE_NEURALE`, `0` per disattivarla): qualità molto superiore alle voci di sistema e voce maschile, gratis. Rischi accettati: è il servizio di lettura di Edge usato in modo non ufficiale, quindi può smettere di funzionare senza preavviso (da qui la riserva automatica); il testo delle risposte viene inviato a Microsoft.
 - Sintesi vocale di riserva con `say` su macOS invece di pyttsx3: più stabile e voci italiane migliori. Su Windows PowerShell + System.Speech: niente dipendenze extra; costo circa mezzo secondo di avvio per frase.
 - Script PowerShell costanti: il testo da leggere passa tramite variabile d'ambiente, mai interpolato nello script.

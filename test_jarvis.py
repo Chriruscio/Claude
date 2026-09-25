@@ -194,6 +194,12 @@ class TestPronuncia(unittest.TestCase):
         self.assertEqual(jarvis.per_la_voce("Download completato"), "dàunlod completato")
         self.assertEqual(jarvis.per_la_voce("la tua e-mail"), "la tua imèil")
 
+    def test_voce_multilingue_non_riscrive(self):
+        self.assertEqual(
+            jarvis.per_la_voce("J.A.R.V.I.S. ha salvato il file", multilingue=True),
+            "Jarvis ha salvato il file",
+        )
+
     def test_non_tocca_parole_simili(self):
         for testo in ["profile", "filetto", "webcam", "file-system"]:
             with self.subTest(testo=testo):
@@ -260,6 +266,14 @@ class TestConsumi(unittest.TestCase):
                 jarvis.imposta_credito_da_riga_di_comando(["--credito", "tanti"])
         finally:
             jarvis.CONSUMI = originale
+
+
+class TestSaluto(unittest.TestCase):
+    def test_ore(self):
+        self.assertEqual(jarvis.saluto(9), "Buongiorno")
+        self.assertEqual(jarvis.saluto(15), "Buon pomeriggio")
+        self.assertEqual(jarvis.saluto(22), "Buonasera")
+        self.assertEqual(jarvis.saluto(2), "Buonasera")
 
 
 class TestStatoSistema(unittest.TestCase):
