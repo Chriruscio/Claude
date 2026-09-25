@@ -16,7 +16,8 @@ Requisiti Windows (PowerShell):
 
 Avvio:
     python3 jarvis.py        (macOS)
-    py jarvis.py             (Windows)
+    py jarvis.py             (Windows, con finestra del terminale)
+    pyw jarvis.py            (Windows, senza finestre: i messaggi vanno in ~/Jarvis/jarvis.log)
 """
 
 from __future__ import annotations
@@ -28,8 +29,27 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
+
+
+# ==========================================================================
+# REGISTRO (avvio senza finestra)
+# Con pythonw non esiste una console: senza questo, ogni messaggio ed errore
+# andrebbe perso. Deve stare prima degli import che possono fallire.
+# ==========================================================================
+
+CARTELLA_JARVIS = Path.home() / "Jarvis"
+FILE_REGISTRO = CARTELLA_JARVIS / "jarvis.log"
+SENZA_CONSOLE = sys.stdout is None or sys.stderr is None
+
+if SENZA_CONSOLE:
+    CARTELLA_JARVIS.mkdir(parents=True, exist_ok=True)
+    if FILE_REGISTRO.exists() and FILE_REGISTRO.stat().st_size > 1_000_000:
+        FILE_REGISTRO.unlink()   # niente crescita infinita: si riparte da zero oltre 1 MB
+    sys.stdout = sys.stderr = open(FILE_REGISTRO, "a", encoding="utf-8", buffering=1)
+    print(f"\n===== Avvio {datetime.now():%d/%m/%Y %H:%M:%S} =====")
 
 try:
     import anthropic
@@ -61,6 +81,7 @@ MAX_SCAMBI = 6                # scambi completi tenuti in memoria
 MAX_RICERCHE_WEB = 3          # tetto per richiesta: ogni ricerca costa ~0,01 $ piu' i token dei risultati
 MAX_GIRI_TOOL = 6             # anti-loop sul ciclo di tool use
 LISTEN_TIMEOUT = 6
+FINESTRA_ASCOLTO = 8          # secondi, dopo una risposta, in cui non serve dire "Jarvis"
 PHRASE_TIME_LIMIT = 15
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
@@ -120,6 +141,10 @@ PS_BATTERIA = (
 )
 
 
+# Senza questo flag ogni comando lanciato da pythonw farebbe lampeggiare una finestra nera.
+SENZA_FINESTRA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _powershell(script: str, env_extra: dict | None = None, timeout: int = 30):
     env = dict(os.environ)
     if env_extra:
@@ -127,6 +152,7 @@ def _powershell(script: str, env_extra: dict | None = None, timeout: int = 30):
     return subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, errors="replace", timeout=timeout, env=env,
+        creationflags=SENZA_FINESTRA,
     )
 
 
@@ -218,12 +244,16 @@ class Orecchie:
             self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
         print(f"[Soglia energia impostata a {self.recognizer.energy_threshold:.0f}]")
 
-    def ascolta(self) -> str:
+    def ascolta(self, attesa: float | None = None) -> str:
+        """attesa: secondi massimi per iniziare a parlare (default LISTEN_TIMEOUT)."""
         with self.mic as source:
-            print("\n[In ascolto... parli pure]")
+            if not SENZA_CONSOLE:   # nel registro riempirebbe una riga ogni 6 secondi
+                print("\n[In ascolto... parli pure]")
             try:
                 audio = self.recognizer.listen(
-                    source, timeout=LISTEN_TIMEOUT, phrase_time_limit=PHRASE_TIME_LIMIT
+                    source,
+                    timeout=attesa if attesa is not None else LISTEN_TIMEOUT,
+                    phrase_time_limit=PHRASE_TIME_LIMIT,
                 )
             except sr.WaitTimeoutError:
                 return ""
@@ -407,6 +437,7 @@ def tool_chiudi_app(nome: str) -> str:
     esito = subprocess.run(
         ["taskkill", "/IM", processo],
         capture_output=True, text=True, errors="replace", timeout=30,
+        creationflags=SENZA_FINESTRA,
     )
     if esito.returncode == 0:
         return f"{chiave} chiusa."
@@ -719,8 +750,79 @@ def comando_locale(frase: str, scambi: list) -> bool:
 
 
 # ==========================================================================
+# ATTENZIONE: quando J.A.R.V.I.S. ascolta davvero
+#  - sveglio: risponde alle frasi con "Jarvis"; dopo ogni risposta, per
+#    FINESTRA_ASCOLTO secondi, anche alle frasi senza nome (stile Alexa);
+#  - addormentato ("Jarvis, dormi"): ignora tutto tranne "Jarvis, svegliati",
+#    "ehi Jarvis" e lo spegnimento.
+# ==========================================================================
+
+COMANDI_DORMI = {"dormi", "vai a dormire", "riposo", "pausa", "mettiti in pausa"}
+COMANDI_SVEGLIA = {"", "svegliati", "sveglia"}   # "" = solo "ehi Jarvis"
+
+
+class Attenzione:
+    def __init__(self) -> None:
+        self.dorme = False
+        self.attivo_fino = 0.0
+
+    def finestra_aperta(self, ora: float) -> bool:
+        return not self.dorme and ora < self.attivo_fino
+
+    def apri_finestra(self, ora: float) -> None:
+        self.attivo_fino = ora + FINESTRA_ASCOLTO
+
+    def chiudi_finestra(self) -> None:
+        self.attivo_fino = 0.0
+
+    def valuta(self, frase: str, in_finestra: bool) -> str:
+        """Restituisce: 'ignora', 'dormi', 'sveglia', 'attesa' oppure 'comando'."""
+        chiamato = rivolta_a_jarvis(frase)
+        testo = _normalizza(frase)
+        if self.dorme:
+            if chiamato and testo in COMANDI_SVEGLIA:
+                self.dorme = False
+                return "sveglia"
+            if chiamato and testo in COMANDI_USCITA:
+                return "comando"
+            return "ignora"
+        if (chiamato or in_finestra) and testo in COMANDI_DORMI:
+            self.dorme = True
+            self.chiudi_finestra()
+            return "dormi"
+        if chiamato and testo == "":
+            return "attesa"
+        if chiamato or in_finestra:
+            return "comando"
+        return "ignora"
+
+
+# ==========================================================================
 # MAIN
 # ==========================================================================
+
+_blocco_istanza = None   # tenuto aperto per tutta la vita del processo
+
+
+def _unica_istanza() -> bool:
+    """Impedisce due J.A.R.V.I.S. insieme (senza finestre non ci si accorgerebbe)."""
+    global _blocco_istanza
+    CARTELLA_JARVIS.mkdir(parents=True, exist_ok=True)
+    f = open(CARTELLA_JARVIS / "jarvis.lock", "a+")
+    try:
+        if IS_WIN:
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    _blocco_istanza = f
+    return True
+
 
 def main() -> None:
     if not (IS_MAC or IS_WIN):
@@ -733,11 +835,16 @@ def main() -> None:
             aiuto = 'Esegui:  export ANTHROPIC_API_KEY="sk-ant-..."'
         sys.exit(f"ANTHROPIC_API_KEY non impostata.\n{aiuto}")
 
+    if not _unica_istanza():
+        print("[J.A.R.V.I.S. e' gia' in funzione: questa seconda copia si chiude]")
+        return
+
     WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     client = anthropic.Anthropic()
     orecchie = Orecchie()
     scambi: list[list[dict]] = []
+    attenzione = Attenzione()
 
     if IS_MAC:
         voce = VOICE if VOCE_OK else "predefinita di sistema"
@@ -749,20 +856,37 @@ def main() -> None:
     print(f"[Voce: {voce}]")
     print(f"[Cartella di lavoro: {WORKSPACE}]")
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
-    print("[Rispondo solo alle frasi che contengono 'Jarvis']")
+    print(f"[Rispondo alle frasi con 'Jarvis' e, per {FINESTRA_ASCOLTO} secondi dopo ogni risposta, "
+          "anche senza. 'Jarvis, dormi' per la pausa.]")
     parla("Sistemi online. J.A.R.V.I.S. operativo, Signore.")
 
     while True:
         try:
-            frase = orecchie.ascolta()
+            ora = time.monotonic()
+            in_finestra = attenzione.finestra_aperta(ora)
+            # In finestra si aspetta solo il tempo rimasto: una frase iniziata dopo
+            # la scadenza non deve passare senza "Jarvis".
+            attesa = max(1.0, attenzione.attivo_fino - ora) if in_finestra else None
+            frase = orecchie.ascolta(attesa)
             if not frase:
+                if in_finestra:
+                    attenzione.chiudi_finestra()
                 continue
-            if not rivolta_a_jarvis(frase):
-                print("[Ignorata: manca 'Jarvis']")
+
+            azione = attenzione.valuta(frase, in_finestra)
+            if azione == "ignora":
+                print("[Ignorata: in pausa]" if attenzione.dorme else "[Ignorata: manca 'Jarvis']")
                 continue
-            if comando_locale(frase, scambi):
+            if azione == "dormi":
+                parla("Entro in modalita' riposo, Signore. Mi chiami quando serve.")
                 continue
-            parla(chiedi_a_claude(client, scambi, frase))
+            if azione == "sveglia":
+                parla("Di nuovo operativo, Signore.")
+            elif azione == "attesa":
+                parla("Si', Signore?")
+            elif not comando_locale(frase, scambi):
+                parla(chiedi_a_claude(client, scambi, frase))
+            attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
             parla("Disattivazione dei sistemi. Buona giornata, Signore.")
             return
@@ -771,5 +895,23 @@ def main() -> None:
             return
 
 
+def avvia() -> None:
+    """Senza finestre un errore all'avvio sarebbe invisibile: lo si dice a voce."""
+    try:
+        main()
+    except SystemExit as e:
+        if SENZA_CONSOLE and isinstance(e.code, str):
+            print(e.code)
+            parla("Non riesco ad avviarmi, Signore. I dettagli sono nel file jarvis punto log, "
+                  "nella cartella Jarvis.")
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        if SENZA_CONSOLE:
+            parla("Si e' verificato un errore grave, Signore. I dettagli sono nel file jarvis punto log.")
+        raise
+
+
 if __name__ == "__main__":
-    main()
+    avvia()

@@ -172,6 +172,53 @@ class TestComandiLocali(unittest.TestCase):
         self.assertEqual(scambi, [])
 
 
+class TestAttenzione(unittest.TestCase):
+    def test_senza_nome_ignorata_fuori_finestra(self):
+        a = jarvis.Attenzione()
+        self.assertEqual(a.valuta("apri Chrome", in_finestra=False), "ignora")
+        self.assertEqual(a.valuta("Jarvis apri Chrome", in_finestra=False), "comando")
+
+    def test_stile_alexa(self):
+        a = jarvis.Attenzione()
+        self.assertEqual(a.valuta("Ehi Jarvis", in_finestra=False), "attesa")
+        a.apri_finestra(100.0)
+        self.assertTrue(a.finestra_aperta(100.0 + jarvis.FINESTRA_ASCOLTO - 1))
+        self.assertFalse(a.finestra_aperta(100.0 + jarvis.FINESTRA_ASCOLTO + 1))
+        self.assertEqual(a.valuta("apri Chrome", in_finestra=True), "comando")
+
+    def test_pausa_e_risveglio(self):
+        a = jarvis.Attenzione()
+        a.apri_finestra(100.0)
+        self.assertEqual(a.valuta("Jarvis, dormi", in_finestra=True), "dormi")
+        self.assertFalse(a.finestra_aperta(100.0))
+        for frase in ["apri Chrome", "Jarvis apri Chrome", "che ore sono"]:
+            with self.subTest(frase=frase):
+                self.assertEqual(a.valuta(frase, in_finestra=False), "ignora")
+        self.assertEqual(a.valuta("Jarvis, spegniti", in_finestra=False), "comando")
+        self.assertEqual(a.valuta("Ehi Jarvis", in_finestra=False), "sveglia")
+        self.assertFalse(a.dorme)
+
+    def test_svegliati(self):
+        a = jarvis.Attenzione()
+        a.valuta("Jarvis vai a dormire", in_finestra=False)
+        self.assertEqual(a.valuta("Jarvis svegliati", in_finestra=False), "sveglia")
+
+
+class TestUnicaIstanza(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "comportamento del blocco su Windows da verificare a mano")
+    def test_seconda_copia_rifiutata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            originale = jarvis.CARTELLA_JARVIS
+            jarvis.CARTELLA_JARVIS = Path(tmp)
+            try:
+                self.assertTrue(jarvis._unica_istanza())
+                primo = jarvis._blocco_istanza
+                self.assertFalse(jarvis._unica_istanza())
+                primo.close()
+            finally:
+                jarvis.CARTELLA_JARVIS = originale
+
+
 class TestCicloDialogo(unittest.TestCase):
     def test_risposta_semplice(self):
         client = ClientFinto(_risposta("end_turn", _testo("Buongiorno, Signore.")))
