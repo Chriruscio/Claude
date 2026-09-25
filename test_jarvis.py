@@ -141,6 +141,13 @@ class TestFileApp(unittest.TestCase):
         self.assertFalse(jarvis._voce_app_valida('Finder" to do shell script "x'))
 
 
+class TestStatoSistema(unittest.TestCase):
+    def test_giorno_della_settimana(self):
+        from datetime import datetime
+        atteso = jarvis.GIORNI[datetime.now().weekday()]
+        self.assertIn(atteso, jarvis.tool_stato_sistema("ora"))
+
+
 class TestComandiLocali(unittest.TestCase):
     def test_uscita(self):
         for frase in ["Esci", "Jarvis, spegniti", "arrivederci jarvis", "termina la sessione"]:

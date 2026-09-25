@@ -638,10 +638,15 @@ def _disco() -> str:
     return f"{uso.free / gb:.0f} GB liberi su {uso.total / gb:.0f} GB ({radice})"
 
 
+GIORNI = ("lunedi'", "martedi'", "mercoledi'", "giovedi'", "venerdi'", "sabato", "domenica")
+
+
 def tool_stato_sistema(cosa: str = "tutto") -> str:
     pezzi = []
     if cosa in ("ora", "tutto"):
-        pezzi.append(f"Data e ora: {datetime.now():%d/%m/%Y %H:%M}")
+        adesso = datetime.now()
+        # Il giorno della settimana va dato esplicitamente: il modello, se deve dedurlo, sbaglia.
+        pezzi.append(f"Data e ora: {GIORNI[adesso.weekday()]} {adesso:%d/%m/%Y %H:%M}")
     if cosa in ("batteria", "tutto"):
         try:
             pezzi.append("Batteria: " + _batteria())
