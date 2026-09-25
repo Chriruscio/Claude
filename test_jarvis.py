@@ -282,7 +282,7 @@ class TestComandiLocali(unittest.TestCase):
                 self.assertFalse(jarvis.comando_locale(frase, []))
 
     def test_parola_di_attivazione(self):
-        for frase in ["Jarvis che ore sono", "apri Chrome, Jarvis", "ehi Giarvis spegniti"]:
+        for frase in ["Jarvis che ore sono", "apri Chrome, Jarvis", "ehi Giarvis spegniti", "Jarvi apri Chrome"]:
             with self.subTest(frase=frase):
                 self.assertTrue(jarvis.rivolta_a_jarvis(frase))
         for frase in ["che ore sono", "apri Chrome", "ho visto Travis ieri", ""]:

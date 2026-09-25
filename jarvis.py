@@ -1077,7 +1077,7 @@ COMANDI_AZZERA = {"dimentica tutto", "azzera la memoria"}
 # Solo le frasi che contengono una di queste parole vengono prese come comandi:
 # il resto (conversazioni, TV) non arriva a Claude, non costa e non fa agire.
 # Le varianti coprono le trascrizioni sbagliate piu' probabili.
-PAROLE_ATTIVAZIONE = {"jarvis", "giarvis", "jervis"}
+PAROLE_ATTIVAZIONE = {"jarvis", "jarvi", "giarvis", "jervis"}
 PAROLE_DI_CORTESIA = PAROLE_ATTIVAZIONE | {"ehi", "hey", "ei", "per", "favore", "grazie"}
 
 
