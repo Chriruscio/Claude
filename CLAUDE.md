@@ -43,8 +43,8 @@ Nessuna. Non esiste bridge, né protocollo, né scambio di messaggi tra il Mac e
 
 ## 7. Problemi aperti
 - Credito API non ancora caricato sulla Console Anthropic: senza credito le chiamate falliscono con errori di fatturazione della classe 400.
-- `portaudio` e `pyaudio` non ancora installati sul Mac; `pyaudio` non ancora installato sul PC.
+- `portaudio` e `pyaudio` non ancora installati sul Mac.
 - Permessi macOS non ancora concessi: Microfono per il Terminale, Automazione per `chiudi_app`.
-- Windows: verificare che esista una voce italiana visibile a System.Speech (alcune voci installate da Impostazioni sono visibili solo alle app moderne). Se all'avvio compare "nessuna voce italiana installata", la voce sarà inglese.
-- Windows: i bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
-- Verificati finora solo la compilazione e i test automatici (sandbox, comandi locali, ciclo di dialogo con client finto, su Linux). Microfono, voce, apertura/chiusura app e chiamate API reali non sono mai stati eseguiti né su Mac né su Windows.
+- Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
+- Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
+- Mai eseguite finora: chiamate API reali (su entrambi i sistemi) e tutto il lato Mac.
