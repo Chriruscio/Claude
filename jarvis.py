@@ -90,8 +90,9 @@ SPEECH_RATE = int(os.environ.get("JARVIS_RATE", "190"))         # macOS: parole 
 SPEECH_RATE_WIN = int(os.environ.get("JARVIS_RATE_WIN", "1"))   # Windows: da -10 a 10
 STT_LANG = "it-IT"
 # Voce neurale Microsoft (servizio online di Edge). "0" per usare solo la voce di sistema.
-# Altre voci italiane: it-IT-GiuseppeNeural, it-IT-IsabellaNeural, it-IT-ElsaNeural.
-VOCE_NEURALE = os.environ.get("JARVIS_VOCE_NEURALE", "it-IT-DiegoNeural")
+# Giuseppe multilingue: italiano naturale e parole inglesi pronunciate all'inglese.
+# Alternative: it-IT-DiegoNeural (solo italiano), it-IT-IsabellaNeural, it-IT-ElsaNeural.
+VOCE_NEURALE = os.environ.get("JARVIS_VOCE_NEURALE", "it-IT-GiuseppeMultilingualNeural")
 
 MAX_TOKENS = 1024
 MAX_SCAMBI = 6                # scambi completi tenuti in memoria
@@ -460,12 +461,13 @@ _PAROLE_INGLESI = re.compile(
 def per_la_voce(testo: str, multilingue: bool = False) -> str:
     """
     Voci solo italiane: nome e parole inglesi riscritti all'italiana.
-    Voci multilingue: leggono l'inglese da sole, la riscrittura le peggiorerebbe;
-    si tolgono solo i punti dal nome, altrimenti lo leggono lettera per lettera.
+    Voci multilingue: leggono le parole inglesi da sole, riscriverle le peggiorerebbe.
+    Il nome invece va riscritto anche per loro: in una frase italiana leggono
+    "Jarvis" come "Iarvis" (verificato a orecchio con Giuseppe).
     """
-    if multilingue:
-        return _NOME_SCRITTO.sub("Jarvis", testo)
     testo = _NOME_SCRITTO.sub("Giarvis", testo)
+    if multilingue:
+        return testo
     return _PAROLE_INGLESI.sub(lambda m: PRONUNCIA[m.group(1).lower()], testo)
 
 

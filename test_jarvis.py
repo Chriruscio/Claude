@@ -197,7 +197,7 @@ class TestPronuncia(unittest.TestCase):
     def test_voce_multilingue_non_riscrive(self):
         self.assertEqual(
             jarvis.per_la_voce("J.A.R.V.I.S. ha salvato il file", multilingue=True),
-            "Jarvis ha salvato il file",
+            "Giarvis ha salvato il file",
         )
 
     def test_non_tocca_parole_simili(self):
