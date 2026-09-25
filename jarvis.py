@@ -115,7 +115,8 @@ NOME_MACCHINA = "MacBook" if IS_MAC else "PC Windows"
 SYSTEM_PROMPT = (
     f"Sei Jarvis, l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian. "
     "Rispondi sempre in italiano, con tono formale, efficiente e leggermente sarcastico "
-    "ma sempre rispettoso, rivolgendoti all'utente come 'Signore'.\n\n"
+    "ma sempre rispettoso, rivolgendoti all'utente come 'Signore', "
+    "al massimo una volta per risposta e preferibilmente non in fondo alla frase.\n\n"
     "Le tue risposte vengono lette ad alta voce da un sintetizzatore vocale. Quindi: "
     "massimo tre frasi, prosa continua, niente elenchi puntati, niente markdown, "
     "niente emoji, niente URL letti per esteso (di' 'secondo il sito X'), niente codice. "
@@ -185,6 +186,102 @@ def _powershell(script: str, env_extra: dict | None = None, timeout: int = 30):
 # cosi' un sito aperto nel browser non puo' leggerlo (DNS rebinding).
 # ==========================================================================
 
+# ==========================================================================
+# CONSUMI: token e spesa stimata
+# Con una chiave API normale il saldo reale della Console non e' leggibile:
+# l'utente indica il credito (--credito), J.A.R.V.I.S. somma il costo stimato
+# di ogni richiesta e lo sottrae. Il dato vero resta quello della Console.
+# ==========================================================================
+
+# Dollari per milione di token (input, output). Fonte: listino Anthropic.
+PREZZI_MODELLI = {
+    "claude-haiku-4-5": (1.00, 5.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-opus-5": (5.00, 25.00),
+}
+PREZZO_RICERCA_WEB = 0.01   # dollari per ricerca
+FILE_CONSUMI = CARTELLA_JARVIS / "consumi.json"
+
+
+def prezzi_del_modello(modello: str) -> tuple[float, float] | None:
+    return PREZZI_MODELLI.get(re.sub(r"-\d{8}$", "", modello))
+
+
+class Contatore:
+    CAMPI = ("token_input", "token_output", "ricerche_web", "richieste", "spesa")
+
+    def __init__(self, percorso: Path) -> None:
+        self._lock = threading.Lock()
+        self.percorso = percorso
+        self.sessione = dict.fromkeys(self.CAMPI, 0)
+        self.totale = dict.fromkeys(self.CAMPI, 0)   # dall'ultima impostazione del credito
+        self.credito: float | None = None
+        self._carica()
+
+    def _carica(self) -> None:
+        try:
+            dati = json.loads(self.percorso.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if isinstance(dati, dict):
+            self.credito = dati.get("credito")
+            for campo in self.CAMPI:
+                self.totale[campo] = dati.get(campo, 0)
+
+    def _salva(self) -> None:
+        self.percorso.parent.mkdir(parents=True, exist_ok=True)
+        provvisorio = self.percorso.with_suffix(".tmp")
+        provvisorio.write_text(json.dumps({"credito": self.credito, **self.totale}), encoding="utf-8")
+        provvisorio.replace(self.percorso)
+
+    def imposta_credito(self, dollari: float) -> None:
+        """Riparte da zero: da qui in poi il residuo e' dollari meno la spesa stimata."""
+        with self._lock:
+            self.credito = dollari
+            self.totale = dict.fromkeys(self.CAMPI, 0)
+            self._salva()
+
+    def registra(self, usage) -> None:
+        entrata = sum(
+            getattr(usage, campo, 0) or 0
+            for campo in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        )
+        uscita = getattr(usage, "output_tokens", 0) or 0
+        ricerche = getattr(getattr(usage, "server_tool_use", None), "web_search_requests", 0) or 0
+        if not (entrata or uscita or ricerche):
+            return
+        prezzi = prezzi_del_modello(MODEL)
+        costo = 0.0
+        if prezzi:
+            costo = entrata * prezzi[0] / 1e6 + uscita * prezzi[1] / 1e6
+        costo += ricerche * PREZZO_RICERCA_WEB
+        with self._lock:
+            for somma in (self.sessione, self.totale):
+                somma["token_input"] += entrata
+                somma["token_output"] += uscita
+                somma["ricerche_web"] += ricerche
+                somma["richieste"] += 1
+                somma["spesa"] += costo
+            try:
+                self._salva()
+            except OSError as e:
+                print(f"[Consumi non salvati: {e}]")
+
+    def riepilogo(self) -> dict:
+        with self._lock:
+            residuo = None if self.credito is None else self.credito - self.totale["spesa"]
+            return {
+                "sessione": dict(self.sessione),
+                "totale": dict(self.totale),
+                "credito": self.credito,
+                "residuo": residuo,
+                "prezzi_noti": prezzi_del_modello(MODEL) is not None,
+            }
+
+
+CONSUMI = Contatore(FILE_CONSUMI)
+
+
 class Hud:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -211,6 +308,7 @@ class Hud:
                 "dettaglio": self.dettaglio,
                 "storico": list(self.storico),
                 "versione": self.versione,
+                "consumi": CONSUMI.riepilogo(),
             }
 
     def pagina_aperta(self) -> bool:
@@ -329,8 +427,35 @@ VOCE_WIN = _voce_windows_italiana() if IS_WIN else ""
 _NOME_SCRITTO = re.compile(r"\bJ\.?A\.?R\.?V\.?I\.?S\b\.?", re.IGNORECASE)
 
 
+# Parole inglesi riscritte come le pronuncerebbe un italiano: la voce italiana
+# altrimenti le legge lettera per lettera all'italiana ("fi-le"). Grafie da
+# ritoccare a orecchio.
+PRONUNCIA = {
+    "file": "fàil",
+    "download": "dàunlod",
+    "upload": "àplod",
+    "browser": "bràuser",
+    "e-mail": "imèil",
+    "email": "imèil",
+    "software": "sòftuer",
+    "hardware": "àrduer",
+    "desktop": "dèsktop",
+    "online": "onlàin",
+    "offline": "offlàin",
+    "password": "pàssuord",
+    "web": "uèb",
+    "wi-fi": "uaifài",
+    "wifi": "uaifài",
+}
+_PAROLE_INGLESI = re.compile(
+    r"(?<![\w-])(" + "|".join(re.escape(p) for p in sorted(PRONUNCIA, key=len, reverse=True)) + r")(?![\w-])",
+    re.IGNORECASE,
+)
+
+
 def per_la_voce(testo: str) -> str:
-    return _NOME_SCRITTO.sub("Giarvis", testo)
+    testo = _NOME_SCRITTO.sub("Giarvis", testo)
+    return _PAROLE_INGLESI.sub(lambda m: PRONUNCIA[m.group(1).lower()], testo)
 
 
 _neurale_attiva = NEURALE_INSTALLATA and VOCE_NEURALE not in ("", "0")
@@ -890,6 +1015,7 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
             print(f"[Errore API {e.status_code}]: {e.message}")
             return "Ho riscontrato un errore tecnico, Signore. I dettagli sono a schermo."
 
+        CONSUMI.registra(risposta.usage)
         uso = getattr(risposta.usage, "server_tool_use", None)
         if uso and getattr(uso, "web_search_requests", 0):
             print(f"[Ricerche web effettuate: {uso.web_search_requests}]")
@@ -1137,8 +1263,27 @@ def main() -> None:
             return
 
 
+def imposta_credito_da_riga_di_comando(argomenti: list[str]) -> bool:
+    """py jarvis.py --credito 5  ->  registra il credito attuale (quello letto nella Console)."""
+    if "--credito" not in argomenti:
+        return False
+    i = argomenti.index("--credito")
+    try:
+        dollari = float(argomenti[i + 1].replace(",", "."))
+        if dollari < 0:
+            raise ValueError
+    except (IndexError, ValueError):
+        sys.exit("Uso: py jarvis.py --credito 5   (il credito in dollari che vedi nella Console)")
+    CONSUMI.imposta_credito(dollari)
+    print(f"Credito impostato a {dollari:.2f} $. Da ora il residuo mostrato e' una stima "
+          "basata sui consumi di Jarvis.")
+    return True
+
+
 def avvia() -> None:
     """Senza finestre un errore all'avvio sarebbe invisibile: lo si dice a voce."""
+    if imposta_credito_da_riga_di_comando(sys.argv[1:]):
+        return
     try:
         main()
     except SystemExit as e:

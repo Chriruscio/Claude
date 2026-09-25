@@ -160,7 +160,7 @@ class TestSceltaTrascrizione(unittest.TestCase):
 class TestVoce(unittest.TestCase):
     def test_nome_pronunciabile(self):
         casi = {
-            "Sistemi online. J.A.R.V.I.S. operativo": "Sistemi online. Giarvis operativo",
+            "Sistemi pronti. J.A.R.V.I.S. operativo": "Sistemi pronti. Giarvis operativo",
             "Sono Jarvis, Signore.": "Sono Giarvis, Signore.",
             "JARVIS risponde": "Giarvis risponde",
             "Il signor Jarvisson": "Il signor Jarvisson",   # non tocca parole piu' lunghe
@@ -186,6 +186,80 @@ class TestVoce(unittest.TestCase):
             self.assertFalse(jarvis._neurale_attiva)   # non riprova a ogni frase
         finally:
             jarvis._parla_neurale, jarvis._parla_sistema, jarvis._neurale_attiva = originali
+
+
+class TestPronuncia(unittest.TestCase):
+    def test_parole_inglesi(self):
+        self.assertEqual(jarvis.per_la_voce("Ho salvato il file."), "Ho salvato il fàil.")
+        self.assertEqual(jarvis.per_la_voce("Download completato"), "dàunlod completato")
+        self.assertEqual(jarvis.per_la_voce("la tua e-mail"), "la tua imèil")
+
+    def test_non_tocca_parole_simili(self):
+        for testo in ["profile", "filetto", "webcam", "file-system"]:
+            with self.subTest(testo=testo):
+                self.assertEqual(jarvis.per_la_voce(testo), testo)
+
+
+class TestConsumi(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.percorso = Path(self._tmp.name) / "consumi.json"
+        self._modello = jarvis.MODEL
+        jarvis.MODEL = "claude-haiku-4-5-20251001"
+
+    def tearDown(self):
+        jarvis.MODEL = self._modello
+        self._tmp.cleanup()
+
+    def _usage(self, entrata, uscita, ricerche=0):
+        return SimpleNamespace(
+            input_tokens=entrata, output_tokens=uscita,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            server_tool_use=SimpleNamespace(web_search_requests=ricerche),
+        )
+
+    def test_prezzi(self):
+        self.assertEqual(jarvis.prezzi_del_modello("claude-haiku-4-5-20251001"), (1.0, 5.0))
+        self.assertIsNone(jarvis.prezzi_del_modello("claude-opus-5-5"))   # non confondere con opus-5
+
+    def test_costo_e_residuo(self):
+        c = jarvis.Contatore(self.percorso)
+        c.imposta_credito(5.0)
+        c.registra(self._usage(2_000, 100))          # 0,002 + 0,0005
+        c.registra(self._usage(3_000, 200, ricerche=1))   # 0,003 + 0,001 + 0,01
+        r = c.riepilogo()
+        self.assertEqual(r["sessione"]["richieste"], 2)
+        self.assertEqual(r["sessione"]["token_input"], 5_000)
+        self.assertAlmostEqual(r["totale"]["spesa"], 0.0165)
+        self.assertAlmostEqual(r["residuo"], 4.9835)
+
+    def test_persistenza_tra_avvii(self):
+        c = jarvis.Contatore(self.percorso)
+        c.imposta_credito(5.0)
+        c.registra(self._usage(1_000_000, 0))
+        nuovo = jarvis.Contatore(self.percorso)
+        self.assertAlmostEqual(nuovo.riepilogo()["residuo"], 4.0)
+        self.assertEqual(nuovo.riepilogo()["sessione"]["richieste"], 0)
+
+    def test_senza_credito(self):
+        r = jarvis.Contatore(self.percorso).riepilogo()
+        self.assertIsNone(r["residuo"])
+
+    def test_file_rovinato(self):
+        self.percorso.write_text("non json", encoding="utf-8")
+        self.assertIsNone(jarvis.Contatore(self.percorso).riepilogo()["credito"])
+
+    def test_riga_di_comando(self):
+        originale = jarvis.CONSUMI
+        jarvis.CONSUMI = jarvis.Contatore(self.percorso)
+        try:
+            self.assertFalse(jarvis.imposta_credito_da_riga_di_comando([]))
+            self.assertTrue(jarvis.imposta_credito_da_riga_di_comando(["--credito", "4,75"]))
+            self.assertEqual(jarvis.CONSUMI.credito, 4.75)
+            with self.assertRaises(SystemExit):
+                jarvis.imposta_credito_da_riga_di_comando(["--credito", "tanti"])
+        finally:
+            jarvis.CONSUMI = originale
 
 
 class TestStatoSistema(unittest.TestCase):
@@ -310,6 +384,7 @@ class TestServerHud(unittest.TestCase):
         self.assertEqual(r.status, 200)
         dati = json.loads(corpo)
         self.assertEqual((dati["stato"], dati["dettaglio"]), ("parla", "prova"))
+        self.assertIn("residuo", dati["consumi"])
         self.assertIsNone(r.getheader("Access-Control-Allow-Origin"))
 
     def test_host_estraneo_rifiutato(self):
