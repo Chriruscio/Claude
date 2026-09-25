@@ -150,6 +150,18 @@ class TestComandiLocali(unittest.TestCase):
             with self.subTest(frase=frase):
                 self.assertFalse(jarvis.comando_locale(frase, []))
 
+    def test_parola_di_attivazione(self):
+        for frase in ["Jarvis che ore sono", "apri Chrome, Jarvis", "ehi Giarvis spegniti"]:
+            with self.subTest(frase=frase):
+                self.assertTrue(jarvis.rivolta_a_jarvis(frase))
+        for frase in ["che ore sono", "apri Chrome", "ho visto Travis ieri", ""]:
+            with self.subTest(frase=frase):
+                self.assertFalse(jarvis.rivolta_a_jarvis(frase))
+
+    def test_uscita_con_ehi(self):
+        with self.assertRaises(jarvis.Spegnimento):
+            jarvis.comando_locale("Ehi Jarvis, spegniti", [])
+
     def test_azzera_memoria(self):
         scambi = [["qualcosa"]]
         vecchio, jarvis.parla = jarvis.parla, lambda testo: None

@@ -690,7 +690,16 @@ COMANDI_USCITA = {
     "spegniti", "spegnimento", "arrivederci", "esci", "termina sessione", "termina la sessione",
 }
 COMANDI_AZZERA = {"dimentica tutto", "azzera la memoria"}
-PAROLE_DI_CORTESIA = {"jarvis", "giarvis", "per", "favore", "grazie"}
+
+# Solo le frasi che contengono una di queste parole vengono prese come comandi:
+# il resto (conversazioni, TV) non arriva a Claude, non costa e non fa agire.
+# Le varianti coprono le trascrizioni sbagliate piu' probabili.
+PAROLE_ATTIVAZIONE = {"jarvis", "giarvis", "jervis"}
+PAROLE_DI_CORTESIA = PAROLE_ATTIVAZIONE | {"ehi", "hey", "ei", "per", "favore", "grazie"}
+
+
+def rivolta_a_jarvis(frase: str) -> bool:
+    return any(p in PAROLE_ATTIVAZIONE for p in re.findall(r"\w+", frase.lower()))
 
 
 def _normalizza(frase: str) -> str:
@@ -740,12 +749,16 @@ def main() -> None:
     print(f"[Voce: {voce}]")
     print(f"[Cartella di lavoro: {WORKSPACE}]")
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
+    print("[Rispondo solo alle frasi che contengono 'Jarvis']")
     parla("Sistemi online. J.A.R.V.I.S. operativo, Signore.")
 
     while True:
         try:
             frase = orecchie.ascolta()
             if not frase:
+                continue
+            if not rivolta_a_jarvis(frase):
+                print("[Ignorata: manca 'Jarvis']")
                 continue
             if comando_locale(frase, scambi):
                 continue
