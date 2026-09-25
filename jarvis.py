@@ -7,11 +7,11 @@ dichiarati in TOOLS_LOCALI, e lettura e scrittura file sono confinate a una sand
 
 Requisiti macOS:
     brew install portaudio
-    pip install anthropic SpeechRecognition pyaudio
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio
     export ANTHROPIC_API_KEY="sk-ant-..."
 
 Requisiti Windows (PowerShell):
-    pip install anthropic SpeechRecognition pyaudio
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio
     setx ANTHROPIC_API_KEY "sk-ant-..."     (poi riaprire il terminale)
 
 Avvio:
@@ -65,6 +65,16 @@ try:
 except ImportError:
     sys.exit("Manca 'SpeechRecognition'. Esegui: pip install SpeechRecognition pyaudio")
 
+# Voce neurale: facoltativa. Se manca, si usa la voce di sistema.
+try:
+    import asyncio
+    import edge_tts
+    import miniaudio
+    import pyaudio
+    NEURALE_INSTALLATA = True
+except ImportError:
+    NEURALE_INSTALLATA = False
+
 
 # ==========================================================================
 # CONFIGURAZIONE
@@ -79,6 +89,9 @@ VOICE = os.environ.get("JARVIS_VOICE", "Alice")                 # solo macOS
 SPEECH_RATE = int(os.environ.get("JARVIS_RATE", "190"))         # macOS: parole al minuto
 SPEECH_RATE_WIN = int(os.environ.get("JARVIS_RATE_WIN", "1"))   # Windows: da -10 a 10
 STT_LANG = "it-IT"
+# Voce neurale Microsoft (servizio online di Edge). "0" per usare solo la voce di sistema.
+# Altre voci italiane: it-IT-GiuseppeNeural, it-IT-IsabellaNeural, it-IT-ElsaNeural.
+VOCE_NEURALE = os.environ.get("JARVIS_VOCE_NEURALE", "it-IT-DiegoNeural")
 
 MAX_TOKENS = 1024
 MAX_SCAMBI = 6                # scambi completi tenuti in memoria
@@ -100,12 +113,13 @@ WORKSPACE = Path(
 NOME_MACCHINA = "MacBook" if IS_MAC else "PC Windows"
 
 SYSTEM_PROMPT = (
-    f"Sei J.A.R.V.I.S., l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian. "
+    f"Sei Jarvis, l'intelligenza artificiale integrata nel {NOME_MACCHINA} di Christian. "
     "Rispondi sempre in italiano, con tono formale, efficiente e leggermente sarcastico "
     "ma sempre rispettoso, rivolgendoti all'utente come 'Signore'.\n\n"
     "Le tue risposte vengono lette ad alta voce da un sintetizzatore vocale. Quindi: "
     "massimo tre frasi, prosa continua, niente elenchi puntati, niente markdown, "
-    "niente emoji, niente URL letti per esteso (di' 'secondo il sito X'), niente codice.\n\n"
+    "niente emoji, niente URL letti per esteso (di' 'secondo il sito X'), niente codice. "
+    "Scrivi il tuo nome come Jarvis, mai con i punti.\n\n"
     f"Hai a disposizione degli strumenti per agire sul {NOME_MACCHINA}. Usali quando servono, "
     "senza chiedere conferma per azioni innocue come aprire un'app o leggere un file. "
     "Chiedi conferma a voce prima di sovrascrivere un file gia' esistente.\n\n"
@@ -310,13 +324,44 @@ VOCE_OK = _voce_mac_installata(VOICE) if IS_MAC else False
 VOCE_WIN = _voce_windows_italiana() if IS_WIN else ""
 
 
-def parla(testo: str) -> None:
-    testo = (testo or "").strip()
-    if not testo:
-        return
-    print(f"\nJ.A.R.V.I.S.: {testo}")
-    HUD.aggiungi("jarvis", testo)
-    HUD.imposta("parla")
+# Le voci italiane leggono "J.A.R.V.I.S." lettera per lettera e "Jarvis" come "Iarvis":
+# "Giarvis" e' la grafia italiana che suona come il nome inglese.
+_NOME_SCRITTO = re.compile(r"\bJ\.?A\.?R\.?V\.?I\.?S\b\.?", re.IGNORECASE)
+
+
+def per_la_voce(testo: str) -> str:
+    return _NOME_SCRITTO.sub("Giarvis", testo)
+
+
+_neurale_attiva = NEURALE_INSTALLATA and VOCE_NEURALE not in ("", "0")
+
+
+async def _sintetizza(testo: str) -> bytes:
+    audio = bytearray()
+    async for pezzo in edge_tts.Communicate(testo, VOCE_NEURALE).stream():
+        if pezzo["type"] == "audio":
+            audio += pezzo["data"]
+    return bytes(audio)
+
+
+def _parla_neurale(testo: str) -> None:
+    mp3 = asyncio.run(asyncio.wait_for(_sintetizza(testo), timeout=15))
+    if not mp3:
+        raise RuntimeError("nessun audio ricevuto")
+    suono = miniaudio.decode(
+        mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=24000
+    )
+    uscita = pyaudio.PyAudio()
+    try:
+        flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+        flusso.write(suono.samples.tobytes())
+        flusso.stop_stream()
+        flusso.close()
+    finally:
+        uscita.terminate()
+
+
+def _parla_sistema(testo: str) -> None:
     try:
         if IS_MAC:
             cmd = ["say", "-r", str(SPEECH_RATE)]
@@ -340,6 +385,26 @@ def parla(testo: str) -> None:
         pass
     except subprocess.SubprocessError as e:
         print(f"[Sintesi vocale fallita: {e}]")
+
+
+def parla(testo: str) -> None:
+    global _neurale_attiva
+    testo = (testo or "").strip()
+    if not testo:
+        return
+    print(f"\nJ.A.R.V.I.S.: {testo}")
+    HUD.aggiungi("jarvis", testo)
+    HUD.imposta("parla")
+    voce = per_la_voce(testo)
+    if _neurale_attiva:
+        try:
+            _parla_neurale(voce)
+            return
+        except Exception as e:  # servizio non ufficiale: se cade, si passa alla voce di sistema
+            _neurale_attiva = False
+            print(f"[Voce neurale non disponibile ({type(e).__name__}: {e}): "
+                  "passo alla voce di sistema fino al prossimo avvio]")
+    _parla_sistema(voce)
 
 
 # ==========================================================================
@@ -1014,6 +1079,10 @@ def main() -> None:
         voce = VOICE if VOCE_OK else "predefinita di sistema"
     else:
         voce = VOCE_WIN or "predefinita di sistema (nessuna voce italiana installata)"
+    if _neurale_attiva:
+        voce = f"{VOCE_NEURALE} (neurale), riserva: {voce}"
+    elif not NEURALE_INSTALLATA:
+        voce += "  [per la voce neurale: pip install edge-tts miniaudio]"
 
     print(f"[Sistema: {NOME_MACCHINA}]")
     print(f"[Modello: {MODEL}]")
@@ -1022,7 +1091,7 @@ def main() -> None:
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
     print(f"[Rispondo alle frasi con 'Jarvis' e, per {FINESTRA_ASCOLTO} secondi dopo ogni risposta, "
           "anche senza. 'Jarvis, dormi' per la pausa.]")
-    parla("Sistemi online. J.A.R.V.I.S. operativo, Signore.")
+    parla("Sistemi online. Jarvis operativo, Signore.")
 
     while True:
         try:

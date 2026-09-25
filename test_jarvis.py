@@ -157,6 +157,37 @@ class TestSceltaTrascrizione(unittest.TestCase):
                 self.assertEqual(jarvis.scegli_trascrizione(vuoto), "")
 
 
+class TestVoce(unittest.TestCase):
+    def test_nome_pronunciabile(self):
+        casi = {
+            "Sistemi online. J.A.R.V.I.S. operativo": "Sistemi online. Giarvis operativo",
+            "Sono Jarvis, Signore.": "Sono Giarvis, Signore.",
+            "JARVIS risponde": "Giarvis risponde",
+            "Il signor Jarvisson": "Il signor Jarvisson",   # non tocca parole piu' lunghe
+        }
+        for testo, atteso in casi.items():
+            with self.subTest(testo=testo):
+                self.assertEqual(jarvis.per_la_voce(testo), atteso)
+
+    def test_ripiego_sulla_voce_di_sistema(self):
+        detto = []
+        originali = (jarvis._parla_neurale, jarvis._parla_sistema, jarvis._neurale_attiva)
+
+        def neurale_rotta(testo):
+            raise OSError("servizio irraggiungibile")
+
+        jarvis._parla_neurale = neurale_rotta
+        jarvis._parla_sistema = detto.append
+        jarvis._neurale_attiva = True
+        try:
+            jarvis.parla("Prova, J.A.R.V.I.S.")
+            jarvis.parla("Seconda frase")
+            self.assertEqual(detto, ["Prova, Giarvis", "Seconda frase"])
+            self.assertFalse(jarvis._neurale_attiva)   # non riprova a ogni frase
+        finally:
+            jarvis._parla_neurale, jarvis._parla_sistema, jarvis._neurale_attiva = originali
+
+
 class TestStatoSistema(unittest.TestCase):
     def test_giorno_della_settimana(self):
         from datetime import datetime

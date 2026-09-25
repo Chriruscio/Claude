@@ -22,7 +22,7 @@ Avvio senza finestre (Windows: `pyw -3.13 jarvis.py`): con `pythonw` stdout e st
 HUD: all'avvio parte in sottofondo un server HTTP su `127.0.0.1:8765` (`JARVIS_HUD_PORTA`; `JARVIS_HUD=0` per disattivarlo; se la porta è occupata J.A.R.V.I.S. continua senza). Stati: `avvio`, `ascolto`, `attento` (finestra di 8 s), `elaborazione` (con il nome dello strumento), `parla`, `dorme`, `spento`; la pagina mostra `offline` se il server non risponde. "Ehi Jarvis" e "Jarvis, svegliati" aprono la pagina solo se non è già collegata (nessuna richiesta negli ultimi 2 s); su Windows in Edge modalità app (finestra senza barre), altrimenti nel browser predefinito.
 
 Differenze per sistema (scelte in base a `platform.system()`):
-- Voce: macOS `say`; Windows sintetizzatore di sistema (System.Speech) tramite PowerShell, con la prima voce italiana installata.
+- Voce: prima scelta la voce neurale `it-IT-DiegoNeural` tramite `edge-tts` (audio mp3 decodificato con `miniaudio` e suonato con `pyaudio`, su entrambi i sistemi). Riserva: macOS `say`; Windows sintetizzatore di sistema (System.Speech) tramite PowerShell, con la prima voce italiana installata. Alla prima frase in cui la voce neurale fallisce si passa alla riserva fino al riavvio. Prima di parlare il nome ("J.A.R.V.I.S.", "Jarvis") viene riscritto "Giarvis", la grafia che le voci italiane pronunciano come il nome inglese; sullo schermo e nell'HUD resta com'è.
 - App: macOS `open -a` e `osascript ... quit`; Windows `os.startfile` e `taskkill /IM` senza `/F` (chiusura gentile).
 - Batteria: macOS `pmset`; Windows `Win32_Battery` via PowerShell. Disco: `shutil.disk_usage` su entrambi.
 
@@ -34,7 +34,8 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 ## 5. Decisioni prese e perché
 - Modello `claude-haiku-4-5-20251001`: scelto per latenza e costo; supporta il web search nella variante `web_search_20250305` (le varianti più recenti richiedono modelli più grandi).
 - Chiave API letta da `ANTHROPIC_API_KEY`, mai scritta nel sorgente.
-- Sintesi vocale con `say` su macOS invece di pyttsx3: più stabile e voci italiane migliori. Su Windows PowerShell + System.Speech: niente dipendenze extra; costo circa mezzo secondo di avvio per frase.
+- Voce neurale Microsoft via `edge-tts` (`JARVIS_VOCE_NEURALE`, `0` per disattivarla): qualità molto superiore alle voci di sistema e voce maschile, gratis. Rischi accettati: è il servizio di lettura di Edge usato in modo non ufficiale, quindi può smettere di funzionare senza preavviso (da qui la riserva automatica); il testo delle risposte viene inviato a Microsoft.
+- Sintesi vocale di riserva con `say` su macOS invece di pyttsx3: più stabile e voci italiane migliori. Su Windows PowerShell + System.Speech: niente dipendenze extra; costo circa mezzo secondo di avvio per frase.
 - Script PowerShell costanti: il testo da leggere passa tramite variabile d'ambiente, mai interpolato nello script.
 - Whitelist di strumenti invece di esecuzione shell libera: il modello non deve avere potere arbitrario sul computer.
 - Nomi delle app come `enum` nello schema e risolti tramite dizionario: nessun testo generato dal modello raggiunge `open`, `osascript`, `os.startfile` o `taskkill`.
@@ -68,4 +69,5 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
 - Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
 - HUD verificato solo su Linux (Chromium headless, schermate desktop e telefono). Mai aperto su Windows né in Edge modalità app.
+- Voce neurale mai ascoltata: l'ambiente di sviluppo blocca `speech.platform.bing.com`. Pronuncia di "Giarvis" da verificare a orecchio.
 - Mai eseguite finora: chiamate API reali (su entrambi i sistemi) e tutto il lato Mac.
