@@ -4,7 +4,8 @@ Installazione di J.A.R.V.I.S. su Windows, in un colpo solo:
   1. installa i pacchetti Python necessari;
   2. controlla la chiave API;
   3. crea l'icona "Jarvis" sul desktop, che lo avvia senza finestre;
-  4. a richiesta, lo fa partire da solo all'accensione del PC.
+  4. a richiesta, lo fa partire da solo all'accensione del PC;
+  5. a richiesta, attiva il riconoscimento vocale sul PC (Whisper).
 
 Avvio (dalla cartella di jarvis.py):
     py -3.13 installa.py
@@ -154,6 +155,24 @@ def chiedi_avvio_automatico() -> None:
         print("  Non attivato. Puoi rilanciare questo programma quando vuoi.")
 
 
+def chiedi_whisper() -> None:
+    print("\n[Facoltativo] Riconoscimento vocale sul PC (Whisper)")
+    print("  L'audio non va piu' a Google e 'Jarvis' si riconosce meglio. Richiede circa")
+    print("  500 MB (scaricati al primo avvio) e usa il processore mentre trascrive.")
+    risposta = input("  Vuoi attivarlo? Scrivi s oppure n e premi Invio: ").strip().lower()
+    if risposta not in ("s", "si", "sì", "y", "yes"):
+        print("  Resta Google. Puoi cambiare idea rilanciando questo programma.")
+        subprocess.run(["setx", "JARVIS_STT", "google"], capture_output=True)
+        return
+    esito = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "faster-whisper"])
+    if esito.returncode != 0:
+        print("  Installazione di Whisper non riuscita: resta Google.")
+        return
+    # setx scrive la variabile per l'utente: vale per i programmi avviati da ora in poi
+    subprocess.run(["setx", "JARVIS_STT", "whisper"], capture_output=True)
+    print("  Attivato. Vale dal prossimo avvio di Jarvis (per tornare a Google rilancia e rispondi n).")
+
+
 def main() -> None:
     if platform.system() != "Windows":
         sys.exit("Questo programma di installazione e' per Windows. Il Mac lo configuriamo a parte.")
@@ -169,6 +188,7 @@ def main() -> None:
     print(f"Installazione di J.A.R.V.I.S. dalla cartella {CARTELLA_CODICE}")
     if installa_pacchetti():
         controlla_chiave()
+        chiedi_whisper()
         # Nuovo processo: un pacchetto appena installato (pywin32) non sempre e'
         # importabile nel processo che l'ha installato.
         subprocess.run([sys.executable, str(Path(__file__).resolve()), "--collegamenti"])

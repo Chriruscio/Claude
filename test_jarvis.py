@@ -6,6 +6,7 @@ Avvio:  python3 -m unittest test_jarvis -v      (Windows: py -m unittest test_ja
 
 import http.client
 import json
+import math
 import os
 import tempfile
 import threading
@@ -718,6 +719,49 @@ class TestNovitaDaAltriProgetti(unittest.TestCase):
         testo = jarvis.chiedi_a_claude(ClientInFlusso(), [], "che ore sono", voce)
         self.assertEqual("".join(ricevuto), "Sono le dieci. Buona serata.")
         self.assertEqual(testo, "Sono le dieci. Buona serata.")
+
+
+class TestApplausoEWhisper(unittest.TestCase):
+    F = 16000
+
+    def _silenzio(self, secondi, livello=40):
+        import random
+        rnd = random.Random(1)
+        return [int(rnd.uniform(-livello, livello)) for _ in range(int(self.F * secondi))]
+
+    def _colpo(self):
+        import random
+        rnd = random.Random(2)
+        n = int(self.F * 0.03)   # 30 ms che si spengono in fretta
+        return [int(20000 * math.exp(-i / (n / 5)) * rnd.uniform(-1, 1)) for i in range(n)]
+
+    def _voce(self, secondi):
+        n = int(self.F * secondi)
+        return [int(6000 * math.sin(2 * math.pi * 180 * i / self.F)
+                    * (0.6 + 0.4 * math.sin(2 * math.pi * 3 * i / self.F))) for i in range(n)]
+
+    def test_doppio_applauso(self):
+        segnale = self._silenzio(0.5) + self._colpo() + self._silenzio(0.3) + self._colpo() + self._silenzio(1.0)
+        self.assertTrue(jarvis.rileva_doppio_applauso(segnale))
+
+    def test_non_applausi(self):
+        casi = {
+            "singolo": self._silenzio(0.5) + self._colpo() + self._silenzio(1.2),
+            "triplo": self._silenzio(0.3) + (self._colpo() + self._silenzio(0.25)) * 3 + self._silenzio(0.8),
+            "troppo distanti": self._silenzio(0.2) + self._colpo() + self._silenzio(1.2) + self._colpo() + self._silenzio(0.5),
+            "voce": self._silenzio(0.3) + self._voce(1.5) + self._silenzio(0.5),
+            "silenzio": self._silenzio(2.0),
+        }
+        for nome, segnale in casi.items():
+            with self.subTest(nome):
+                self.assertFalse(jarvis.rileva_doppio_applauso(segnale))
+
+    def test_whisper_filtra_allucinazioni(self):
+        seg = lambda testo, p=0.1: SimpleNamespace(text=testo, no_speech_prob=p)
+        self.assertEqual(jarvis.testo_da_whisper([seg(" Jarvis, che ore sono?")]), "Jarvis, che ore sono?")
+        self.assertEqual(jarvis.testo_da_whisper([seg(" Sottotitoli a cura di QTSS")]), "")
+        self.assertEqual(jarvis.testo_da_whisper([seg(" Grazie.", p=0.9)]), "")    # probabile silenzio
+        self.assertEqual(jarvis.testo_da_whisper([]), "")
 
 
 class TestMail(unittest.TestCase):

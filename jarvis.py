@@ -123,6 +123,17 @@ FILE_HUD = Path(__file__).resolve().parent / "hud.html"
 PHRASE_TIME_LIMIT = 15
 # 0,6 s tagliava le frasi lunghe (dettatura di una mail) a chi prende fiato: 1 s.
 PAUSA_FINE_FRASE = float(os.environ.get("JARVIS_PAUSA", "1.0"))
+
+# Riconoscimento vocale: "google" (servizio online, predefinito) oppure "whisper" (sul PC,
+# con faster-whisper: l'audio non esce dal computer e "Jarvis" si riconosce meglio).
+STT_MOTORE = os.environ.get("JARVIS_STT", "google").strip().lower()
+WHISPER_MODELLO = os.environ.get("JARVIS_WHISPER_MODELLO", "small")
+# Frasi d'esempio che orientano Whisper verso il nome e i comandi di J.A.R.V.I.S.
+PROMPT_WHISPER = "Jarvis, che ore sono? Jarvis, apri Chrome. Conferma. Jarvis, dormi."
+
+# Doppio battito di mani = "ehi Jarvis" (idea presa da Julian-Ivanov/jarvis-voice-assistant).
+APPLAUSO_ATTIVO = os.environ.get("JARVIS_APPLAUSO", "1") != "0"
+APPLAUSO = "\x00applauso"   # valore speciale restituito da Orecchie.ascolta()
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
 WORKSPACE = Path(
@@ -985,6 +996,22 @@ class Orecchie:
         with self.mic as source:
             self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
         print(f"[Soglia energia impostata a {self.recognizer.energy_threshold:.0f}]")
+        self.whisper = carica_whisper() if STT_MOTORE == "whisper" else None
+        print(f"[Riconoscimento vocale: {'Whisper ' + WHISPER_MODELLO + ' sul PC' if self.whisper else 'Google'}"
+              f"{' · doppio applauso attivo' if APPLAUSO_ATTIVO else ''}]")
+
+    def _trascrivi(self, audio) -> str:
+        if self.whisper is not None:
+            import numpy
+            grezzo = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            campioni = numpy.frombuffer(grezzo, dtype=numpy.int16).astype(numpy.float32) / 32768.0
+            segmenti, _ = self.whisper.transcribe(
+                campioni, language="it", beam_size=1, initial_prompt=PROMPT_WHISPER,
+                condition_on_previous_text=False,
+            )
+            return testo_da_whisper(segmenti)
+        risultato = self.recognizer.recognize_google(audio, language=STT_LANG, show_all=True)
+        return scegli_trascrizione(risultato)
 
     def ascolta(self, attesa: float | None = None) -> str:
         """attesa: secondi massimi per iniziare a parlare (default LISTEN_TIMEOUT)."""
@@ -1001,18 +1028,94 @@ class Orecchie:
                 return ""
         fine_parlato = time.monotonic()
         TEMPI["_fine_parlato"] = fine_parlato
+        if APPLAUSO_ATTIVO:
+            # Prima di trascrivere: un doppio battito di mani non va mandato a nessuno.
+            grezzo = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            if len(grezzo) <= 2 * 16000 * 4 and rileva_doppio_applauso(array.array("h", grezzo)):
+                print("[Doppio applauso]")
+                return APPLAUSO
         try:
-            risultato = self.recognizer.recognize_google(audio, language=STT_LANG, show_all=True)
+            testo = self._trascrivi(audio)
             TEMPI["trascrizione"] = time.monotonic() - fine_parlato
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
             print(f"[Servizio di trascrizione non raggiungibile: {e}]")
             return ""
-        testo = scegli_trascrizione(risultato)
+        except Exception as e:   # Whisper: un errore non deve fermare l'ascolto
+            print(f"[Trascrizione non riuscita: {type(e).__name__}: {e}]")
+            return ""
         if testo:
             print(f"Tu: {testo}")
         return testo
+
+
+# Frasi che Whisper "inventa" sul silenzio o sul rumore (residui dei sottotitoli con
+# cui e' stato addestrato): se la trascrizione e' solo questo, non si e' detto niente.
+ALLUCINAZIONI_WHISPER = (
+    "sottotitoli", "amara.org", "qtss", "grazie per la visione", "iscriviti al canale",
+)
+
+
+def testo_da_whisper(segmenti) -> str:
+    parti = [
+        s.text.strip() for s in segmenti
+        if getattr(s, "no_speech_prob", 0.0) < 0.6 and s.text.strip()
+    ]
+    testo = " ".join(parti).strip()
+    if not testo or any(frase in testo.lower() for frase in ALLUCINAZIONI_WHISPER):
+        return ""
+    return testo
+
+
+def carica_whisper():
+    """Modello Whisper sul PC; None (e si usa Google) se non e' installato o non si carica."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("[Whisper non installato: py -3.13 -m pip install faster-whisper. Uso Google.]")
+        return None
+    print(f"[Carico Whisper '{WHISPER_MODELLO}': la prima volta lo scarica (centinaia di MB)...]")
+    try:
+        return WhisperModel(WHISPER_MODELLO, device="cpu", compute_type="int8")
+    except Exception as e:
+        print(f"[Whisper non caricato ({type(e).__name__}: {e}). Uso Google.]")
+        return None
+
+
+def rileva_doppio_applauso(campioni, frequenza: int = 16000) -> bool:
+    """
+    Due colpi secchi e brevi (<= 100 ms ciascuno) a distanza di 0,12-0,8 s, con silenzio
+    intorno. La voce non passa: le sillabe sono piu' lunghe e l'energia e' continua.
+    """
+    passo = frequenza // 100   # blocchi da 10 ms
+    livelli = [
+        math.sqrt(sum(c * c for c in campioni[i:i + passo]) / passo)
+        for i in range(0, len(campioni) - passo + 1, passo)
+    ]
+    if len(livelli) < 20:
+        return False
+    picco = max(livelli)
+    rumore = max(sorted(livelli)[len(livelli) // 5], 30.0)
+    if picco < 1500 or picco < 8 * rumore:
+        return False
+    soglia = max(0.35 * picco, 5 * rumore)
+    colpi, i = [], 0
+    while i < len(livelli):
+        if livelli[i] >= soglia:
+            inizio = i
+            while i < len(livelli) and livelli[i] >= soglia:
+                i += 1
+            if i - inizio > 10:   # sopra soglia per piu' di 100 ms: e' voce o rumore lungo
+                return False
+            if colpi and inizio - colpi[-1] < 8:   # coda dello stesso colpo
+                continue
+            colpi.append(inizio)
+        i += 1
+    attivi = sum(1 for l in livelli if l >= 0.15 * picco)
+    if attivi > 0.2 * len(livelli):
+        return False
+    return len(colpi) == 2 and 12 <= colpi[1] - colpi[0] <= 80
 
 
 def scegli_trascrizione(risultato) -> str:
@@ -2333,13 +2436,18 @@ def main() -> None:
                     attenzione.chiudi_finestra()
                 continue
 
-            azione = attenzione.valuta(frase, in_finestra)
+            if frase == APPLAUSO:
+                # doppio applauso = "ehi Jarvis", anche per svegliarlo dalla pausa
+                azione = "sveglia" if attenzione.dorme else "attesa"
+                attenzione.dorme = False
+            else:
+                azione = attenzione.valuta(frase, in_finestra)
             if azione == "ignora" and risposta_a_conferma(frase, attenzione, time.monotonic()):
                 azione = "comando"
             if azione == "ignora":
                 print("[Ignorata: in pausa]" if attenzione.dorme else "[Ignorata: manca 'Jarvis']")
                 continue
-            HUD.aggiungi("utente", frase)
+            HUD.aggiungi("utente", "[doppio applauso]" if frase == APPLAUSO else frase)
             if azione == "dormi":
                 suona("riposo")
                 parla("Modalita' riposo. Mi chiami quando serve.")
