@@ -347,6 +347,7 @@ class Hud:
                 "consumi": CONSUMI.riepilogo(),
                 "sistema": self.sistema,
                 "voce": self.voce,
+                "claude_code": LAVORO.stato(),
             }
 
     def pagina_aperta(self) -> bool:
@@ -1123,6 +1124,292 @@ def esegui_tool(nome: str, argomenti: dict) -> str:
 
 
 # ==========================================================================
+# CLAUDE CODE: lavori di programmazione sui progetti dell'utente
+# Protezioni, in ordine:
+#  - solo cartelle elencate a mano dall'utente in progetti_windows.json /
+#    progetti_mac.json; mai la cartella di J.A.R.V.I.S., ~/Jarvis o la sandbox;
+#  - il modello puo' solo PREPARARE il lavoro: parte solo se l'utente dice
+#    "conferma" a voce, e la conferma e' riconosciuta qui, non dal modello;
+#  - Claude Code in modalita' --restricted, con i soli strumenti sui file:
+#    niente comandi, niente web, niente server MCP, niente domande di permesso;
+#  - il compito (testo del modello) passa da stdin, mai tra gli argomenti;
+#  - senza ANTHROPIC_API_KEY nell'ambiente, cosi' usa l'abbonamento Claude e
+#    non il credito API (in modalita' -p la chiave, se c'e', vince sempre).
+# ==========================================================================
+
+CARTELLA_CODICE_JARVIS = Path(__file__).resolve().parent
+FILE_PROGETTI = CARTELLA_CODICE_JARVIS / ("progetti_windows.json" if IS_WIN else "progetti_mac.json")
+CARTELLA_REPORT = CARTELLA_JARVIS / "claude_code"
+VERSIONE_MINIMA_CLAUDE = (2, 1, 259)   # --restricted dalla 2.1.248, --permission-prompts dalla 2.1.259
+DURATA_MASSIMA_LAVORO = 30 * 60        # secondi
+SCADENZA_CONFERMA = 60                 # secondi per dire "conferma"
+BUDGET_LAVORO_USD = "5"                # tetto di spesa stimata per lavoro
+COMANDI_CONFERMA = {"conferma", "confermo", "si conferma", "sì conferma", "procedi"}
+COMANDI_ANNULLA = {"annulla", "no", "lascia stare", "lascia perdere"}
+ISTRUZIONE_CLAUDE_CODE = (
+    "Svolgi il compito descritto nel testo ricevuto in ingresso, lavorando solo nella "
+    "cartella corrente. Alla fine riassumi in italiano, in due o tre frasi semplici adatte "
+    "a essere lette ad alta voce, cosa hai cambiato e in quali file."
+)
+
+ESEGUIBILE_CLAUDE: str | None = None
+PROGETTI: dict[str, Path] = {}
+
+
+def _cartelle_protette() -> list[Path]:
+    return [CARTELLA_CODICE_JARVIS.resolve(), CARTELLA_JARVIS.resolve(), WORKSPACE.resolve()]
+
+
+def progetto_non_valido(percorso: Path) -> str | None:
+    """Motivo per cui una cartella non puo' essere un progetto, None se va bene."""
+    if not percorso.is_absolute():
+        return "il percorso deve essere completo (es. C:\\Users\\nome\\Progetti\\sito)"
+    cartella = percorso.resolve()
+    if not cartella.is_dir():
+        return "la cartella non esiste"
+    if cartella == Path.home().resolve() or cartella == Path(cartella.anchor):
+        return "cartella troppo ampia (la home o un intero disco)"
+    for protetta in _cartelle_protette():
+        if cartella == protetta or protetta in cartella.parents or cartella in protetta.parents:
+            return "coincide con J.A.R.V.I.S. o la contiene: vietato"
+    return None
+
+
+def carica_progetti(percorso: Path) -> dict[str, Path]:
+    if not percorso.exists():
+        return {}
+    try:
+        dati = json.loads(percorso.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as e:
+        print(f"[ATTENZIONE: {percorso.name} ha un errore alla riga {e.lineno}: {e.msg}. "
+              "Claude Code disattivato.]")
+        return {}
+    except OSError as e:
+        print(f"[ATTENZIONE: {percorso.name} non leggibile ({e}). Claude Code disattivato.]")
+        return {}
+    if not isinstance(dati, dict):
+        print(f"[ATTENZIONE: {percorso.name} deve contenere un elenco tra graffe {{ }}.]")
+        return {}
+    progetti = {}
+    for nome, valore in dati.items():
+        if not isinstance(valore, str) or not valore.strip():
+            print(f"[ATTENZIONE: progetto '{nome}': serve il percorso della cartella. Ignorato.]")
+            continue
+        motivo = progetto_non_valido(Path(valore.strip()).expanduser())
+        if motivo:
+            print(f"[ATTENZIONE: progetto '{nome}': {motivo}. Ignorato.]")
+            continue
+        progetti[nome.strip().lower()] = Path(valore.strip()).expanduser().resolve()
+    return progetti
+
+
+def versione_claude(eseguibile: str) -> tuple[int, int, int] | None:
+    try:
+        esito = subprocess.run(
+            [eseguibile, "--version"], capture_output=True, text=True, errors="replace",
+            timeout=20, creationflags=SENZA_FINESTRA,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    trovata = re.search(r"(\d+)\.(\d+)\.(\d+)", esito.stdout or "")
+    return tuple(int(n) for n in trovata.groups()) if trovata else None
+
+
+def comando_claude_code(eseguibile: str) -> list[str]:
+    """Argomenti tutti costanti: il testo del compito arriva da stdin."""
+    return [
+        eseguibile, "-p", ISTRUZIONE_CLAUDE_CODE,
+        "--restricted",
+        "--tools", "Read,Edit,Write,Glob,Grep",
+        "--disallowedTools", "mcp__*",
+        "--permission-mode", "acceptEdits",
+        "--permission-prompts", "none",
+        "--max-turns", "60",
+        "--max-budget-usd", BUDGET_LAVORO_USD,
+        "--output-format", "json",
+    ]
+
+
+def ambiente_claude_code() -> dict:
+    """Ambiente senza chiavi API: Claude Code usa l'abbonamento, non il credito di J.A.R.V.I.S."""
+    return {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+
+
+def _prime_frasi(testo: str, massimo: int = 320) -> str:
+    testo = re.sub(r"[#*`_>|]", "", testo or "").strip()
+    testo = re.sub(r"\s+", " ", testo)
+    if len(testo) <= massimo:
+        return testo
+    taglio = testo[:massimo]
+    punto = taglio.rfind(". ")
+    return taglio[:punto + 1] if punto > 80 else taglio.rstrip() + "..."
+
+
+class LavoroClaudeCode:
+    def __init__(self, esegui=subprocess.run) -> None:
+        self._lock = threading.Lock()
+        self._esegui_processo = esegui
+        self.in_attesa: dict | None = None
+        self.in_corso: dict | None = None
+        self.avvisi: deque = deque()
+
+    def prepara(self, progetto: str, percorso: Path, compito: str, ora: float) -> None:
+        with self._lock:
+            self.in_attesa = {"progetto": progetto, "percorso": percorso, "compito": compito,
+                              "scade": ora + SCADENZA_CONFERMA}
+
+    def ha_attesa(self, ora: float) -> bool:
+        with self._lock:
+            if self.in_attesa and ora > self.in_attesa["scade"]:
+                self.in_attesa = None
+            return self.in_attesa is not None
+
+    def annulla(self) -> None:
+        with self._lock:
+            self.in_attesa = None
+
+    def occupato(self) -> str | None:
+        with self._lock:
+            return self.in_corso["progetto"] if self.in_corso else None
+
+    def avvia(self) -> str:
+        """Chiamato SOLO dopo la conferma vocale riconosciuta dal ciclo principale."""
+        with self._lock:
+            lavoro, self.in_attesa = self.in_attesa, None
+            if lavoro is None:
+                return "Non c'e' nessun lavoro da confermare."
+            if self.in_corso:
+                return "Claude Code e' gia' al lavoro su un altro progetto."
+            lavoro["inizio"] = time.time()
+            self.in_corso = lavoro
+        threading.Thread(target=self._esegui, args=(lavoro,), daemon=True).start()
+        return f"Avviato su {lavoro['progetto']}. La avviso quando ha finito."
+
+    def _esegui(self, lavoro: dict) -> None:
+        esito_testo, errore, costo = "", False, None
+        try:
+            esito = self._esegui_processo(
+                comando_claude_code(ESEGUIBILE_CLAUDE or "claude"),
+                input=lavoro["compito"], cwd=str(lavoro["percorso"]), env=ambiente_claude_code(),
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=DURATA_MASSIMA_LAVORO, creationflags=SENZA_FINESTRA,
+            )
+            try:
+                dati = json.loads(esito.stdout or "")
+            except ValueError:
+                dati = {}
+            if not isinstance(dati, dict):
+                dati = {}
+            esito_testo = str(dati.get("result") or esito.stdout or esito.stderr or "").strip()
+            errore = bool(dati.get("is_error")) or esito.returncode != 0
+            costo = dati.get("total_cost_usd")
+        except subprocess.TimeoutExpired:
+            errore, esito_testo = True, f"superato il limite di {DURATA_MASSIMA_LAVORO // 60} minuti"
+        except OSError as e:
+            errore, esito_testo = True, f"impossibile avviare Claude Code ({e})"
+        self._chiudi(lavoro, esito_testo, errore, costo)
+
+    def _chiudi(self, lavoro: dict, esito_testo: str, errore: bool, costo) -> None:
+        durata = max(1, round((time.time() - lavoro["inizio"]) / 60))
+        try:
+            CARTELLA_REPORT.mkdir(parents=True, exist_ok=True)
+            nome_progetto = re.sub(r"[^\w-]", "_", lavoro["progetto"])
+            nome = f"{datetime.now():%Y%m%d-%H%M%S}-{nome_progetto}.md"
+            (CARTELLA_REPORT / nome).write_text(
+                f"# Claude Code - {lavoro['progetto']}\n\nCartella: {lavoro['percorso']}\n"
+                f"Durata: circa {durata} min\nCosto stimato: {costo}\nErrore: {errore}\n\n"
+                f"## Compito\n\n{lavoro['compito']}\n\n## Esito\n\n{esito_testo}\n",
+                encoding="utf-8",
+            )
+        except OSError as e:
+            print(f"[Report di Claude Code non salvato: {e}]")
+        if errore:
+            avviso = (f"Claude Code non e' riuscito a completare il lavoro su {lavoro['progetto']}: "
+                      f"{_prime_frasi(esito_testo, 200) or 'motivo sconosciuto'}")
+        else:
+            avviso = (f"Claude Code ha finito il lavoro su {lavoro['progetto']}. "
+                      f"{_prime_frasi(esito_testo)}")
+        with self._lock:
+            self.in_corso = None
+            self.avvisi.append(avviso)
+
+    def prossimo_avviso(self) -> str | None:
+        with self._lock:
+            return self.avvisi.popleft() if self.avvisi else None
+
+    def stato(self) -> dict:
+        with self._lock:
+            if self.in_corso:
+                return {"fase": "lavoro", "progetto": self.in_corso["progetto"],
+                        "secondi": round(time.time() - self.in_corso["inizio"])}
+            if self.in_attesa:
+                return {"fase": "conferma", "progetto": self.in_attesa["progetto"]}
+            return {"fase": "inattivo" if ESEGUIBILE_CLAUDE else "non configurato"}
+
+
+LAVORO = LavoroClaudeCode()
+
+
+def tool_claude_code(progetto: str, compito: str) -> str:
+    chiave = (progetto or "").strip().lower()
+    if chiave not in PROGETTI:
+        return f"Progetto '{progetto}' non presente nell'elenco dell'utente."
+    compito = (compito or "").strip()
+    if not compito:
+        return "Serve una descrizione del compito."
+    if len(compito) > 4000:
+        return "Descrizione del compito troppo lunga: riassumila."
+    occupato = LAVORO.occupato()
+    if occupato:
+        return f"Claude Code sta gia' lavorando su {occupato}: bisogna aspettare che finisca."
+    LAVORO.prepara(chiave, PROGETTI[chiave], compito, time.monotonic())
+    return (
+        "Lavoro PREPARATO ma NON avviato. Riassumi all'utente in una frase cosa fara' Claude Code "
+        f"e in quale progetto ({chiave}), poi chiedigli di dire 'conferma' entro un minuto. "
+        "Non dire che e' gia' partito: parte solo con la sua conferma a voce."
+    )
+
+
+def configura_claude_code() -> None:
+    """Aggiunge lo strumento solo se Claude Code e' installato, aggiornato e ci sono progetti."""
+    global ESEGUIBILE_CLAUDE, PROGETTI
+    PROGETTI = carica_progetti(FILE_PROGETTI)
+    if not PROGETTI:
+        print(f"[Claude Code: nessun progetto. Per attivarlo crea {FILE_PROGETTI.name}]")
+        return
+    eseguibile = shutil.which("claude")
+    if not eseguibile:
+        print("[Claude Code non trovato: installalo o controlla che il comando 'claude' funzioni]")
+        return
+    versione = versione_claude(eseguibile)
+    if versione is None or versione < VERSIONE_MINIMA_CLAUDE:
+        minima = ".".join(map(str, VERSIONE_MINIMA_CLAUDE))
+        print(f"[Claude Code troppo vecchio o illeggibile ({versione}): serve la {minima}. "
+              "Aggiorna con: claude update]")
+        return
+    ESEGUIBILE_CLAUDE = eseguibile
+    ESECUTORI["claude_code"] = tool_claude_code
+    TUTTI_I_TOOLS.insert(len(TOOLS_LOCALI), {
+        "name": "claude_code",
+        "description": (
+            "Affida a Claude Code un lavoro di programmazione o di modifica dei file in uno dei "
+            "progetti dell'utente (puo' leggere, creare e modificare file nella cartella del "
+            "progetto, non puo' eseguire comandi). Il lavoro NON parte subito: serve la conferma "
+            "a voce dell'utente. Descrivi il compito in modo completo e preciso."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "progetto": {"type": "string", "enum": sorted(PROGETTI)},
+                "compito": {"type": "string", "description": "Cosa deve fare Claude Code, in dettaglio."},
+            },
+            "required": ["progetto", "compito"],
+        },
+    })
+    print(f"[Claude Code {'.'.join(map(str, versione))}: progetti {', '.join(sorted(PROGETTI))}]")
+
+
+# ==========================================================================
 # DIALOGO CON CLAUDE (ciclo di tool use)
 # ==========================================================================
 
@@ -1345,6 +1632,8 @@ def main() -> None:
     if URL_HUD:
         avvia_monitor_sistema()
 
+    configura_claude_code()
+
     client = anthropic.Anthropic()
     orecchie = Orecchie()
     scambi: list[list[dict]] = []
@@ -1370,6 +1659,14 @@ def main() -> None:
 
     while True:
         try:
+            avviso = LAVORO.prossimo_avviso()
+            if avviso:
+                HUD.aggiungi("claude", avviso)
+                suona("attivo")
+                parla(avviso)
+                attenzione.apri_finestra(time.monotonic())
+                continue
+
             ora = time.monotonic()
             in_finestra = attenzione.finestra_aperta(ora)
             # In finestra si aspetta solo il tempo rimasto: una frase iniziata dopo
@@ -1402,8 +1699,17 @@ def main() -> None:
                 suona("attivo")
                 apri_hud()
                 parla("Mi dica.")
-            elif not comando_locale(frase, scambi):
-                parla(chiedi_a_claude(client, scambi, frase))
+            elif LAVORO.ha_attesa(time.monotonic()) and _normalizza(frase) in COMANDI_CONFERMA:
+                # La conferma la riconosce J.A.R.V.I.S., non il modello: una pagina web
+                # letta durante una ricerca non puo' far partire un lavoro da sola.
+                parla(LAVORO.avvia())
+            elif LAVORO.ha_attesa(time.monotonic()) and _normalizza(frase) in COMANDI_ANNULLA:
+                LAVORO.annulla()
+                parla("Annullato.")
+            else:
+                LAVORO.annulla()   # qualunque altra frase lascia cadere il lavoro in sospeso
+                if not comando_locale(frase, scambi):
+                    parla(chiedi_a_claude(client, scambi, frase))
             attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
             parla("Disattivazione dei sistemi. A presto, Signore.")

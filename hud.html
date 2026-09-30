@@ -289,6 +289,10 @@
         <div class="barra"><span></span></div>
         <div class="nota"></div>
       </div>
+      <div class="misura" id="m-claude">
+        <div class="riga"><span class="titolo">CLAUDE CODE</span><span class="valore">&mdash;</span></div>
+        <div class="nota"></div>
+      </div>
     </section>
   </main>
 
@@ -357,10 +361,10 @@
   function mostraStorico(voci) {
     storico.replaceChildren(...voci.slice(-6).map((v) => {
       const riga = document.createElement("li");
-      riga.className = v.chi === "jarvis" ? "jarvis" : "utente";
+      riga.className = v.chi === "jarvis" || v.chi === "claude" ? "jarvis" : "utente";
       const chi = document.createElement("span");
       chi.className = "chi";
-      chi.textContent = v.chi === "jarvis" ? "JARVIS" : "TU";
+      chi.textContent = { jarvis: "JARVIS", claude: "CLAUDE" }[v.chi] || "TU";
       const testo = document.createElement("span");
       testo.className = "testo";
       testo.textContent = v.testo;
@@ -415,6 +419,20 @@
     }
   }
 
+  function mostraClaudeCode(c) {
+    if (!c) return;
+    if (c.fase === "lavoro") {
+      const minuti = Math.floor(c.secondi / 60);
+      misura("m-claude", "AL LAVORO", c.progetto + " · " + (minuti < 1 ? "meno di un minuto" : minuti + " min"));
+    } else if (c.fase === "conferma") {
+      misura("m-claude", "CONFERMA?", "dica “conferma” per " + c.progetto);
+    } else if (c.fase === "inattivo") {
+      misura("m-claude", "PRONTO", "nessun lavoro in corso");
+    } else {
+      misura("m-claude", "—", "non configurato");
+    }
+  }
+
   // ======================= Collegamento con J.A.R.V.I.S. =======================
 
   async function aggiorna() {
@@ -426,6 +444,7 @@
       mostraStato(dati.stato, dati.dettaglio);
       mostraConsumi(dati.consumi);
       mostraSistema(dati.sistema);
+      mostraClaudeCode(dati.claude_code);
       if (dati.voce && dati.voce.id !== voce.id) voce = dati.voce;
       if (dati.versione !== versioneMostrata) {
         versioneMostrata = dati.versione;

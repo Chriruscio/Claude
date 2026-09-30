@@ -330,6 +330,112 @@ class TestInstallatore(unittest.TestCase):
         self.assertIn("pywin32", installa.PACCHETTI)
 
 
+class TestClaudeCode(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self._tmp.name).resolve()
+        self.progetto = self.radice / "sito"
+        self.progetto.mkdir()
+        self._originali = (jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO)
+        jarvis.CARTELLA_REPORT = self.radice / "report"
+        jarvis.PROGETTI = {"sito": self.progetto}
+        jarvis.LAVORO = jarvis.LavoroClaudeCode()
+
+    def tearDown(self):
+        jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO = self._originali
+        self._tmp.cleanup()
+
+    def test_cartelle_vietate(self):
+        self.assertIsNone(jarvis.progetto_non_valido(self.progetto))
+        self.assertIsNotNone(jarvis.progetto_non_valido(Path("relativo/sito")))
+        self.assertIsNotNone(jarvis.progetto_non_valido(self.radice / "non-esiste"))
+        self.assertIsNotNone(jarvis.progetto_non_valido(Path.home()))
+        self.assertIsNotNone(jarvis.progetto_non_valido(Path(self.radice.anchor)))
+        # la cartella del codice di J.A.R.V.I.S., una sua sottocartella o una che la contiene
+        self.assertIsNotNone(jarvis.progetto_non_valido(jarvis.CARTELLA_CODICE_JARVIS))
+        self.assertIsNotNone(jarvis.progetto_non_valido(jarvis.CARTELLA_CODICE_JARVIS.parent))
+
+    def test_carica_progetti(self):
+        f = self.radice / "progetti.json"
+        f.write_text(json.dumps({
+            "Sito": str(self.progetto),
+            "jarvis": str(jarvis.CARTELLA_CODICE_JARVIS),
+            "vuoto": "",
+        }), encoding="utf-8")
+        self.assertEqual(jarvis.carica_progetti(f), {"sito": self.progetto})
+        self.assertEqual(jarvis.carica_progetti(self.radice / "manca.json"), {})
+
+    def test_comando_senza_testo_del_modello_e_senza_chiave(self):
+        argomenti = jarvis.comando_claude_code("claude")
+        for obbligatorio in ["--restricted", "--permission-prompts", "none", "--tools",
+                             "Read,Edit,Write,Glob,Grep", "--output-format", "json"]:
+            self.assertIn(obbligatorio, argomenti)
+        self.assertNotIn("Bash", " ".join(argomenti))
+        originale = os.environ.get("ANTHROPIC_API_KEY")
+        os.environ["ANTHROPIC_API_KEY"] = "sk-ant-prova"
+        try:
+            self.assertNotIn("ANTHROPIC_API_KEY", jarvis.ambiente_claude_code())
+        finally:
+            if originale is None:
+                del os.environ["ANTHROPIC_API_KEY"]
+            else:
+                os.environ["ANTHROPIC_API_KEY"] = originale
+
+    def test_prepara_non_avvia(self):
+        esito = jarvis.tool_claude_code("sito", "aggiungi un titolo alla home")
+        self.assertIn("NON avviato", esito)
+        self.assertTrue(jarvis.LAVORO.ha_attesa(0))
+        self.assertIsNone(jarvis.LAVORO.occupato())
+        self.assertIn("non presente", jarvis.tool_claude_code("altro", "x"))
+
+    def test_conferma_scaduta(self):
+        jarvis.tool_claude_code("sito", "compito")
+        self.assertFalse(jarvis.LAVORO.ha_attesa(10 ** 12))
+
+    def test_esecuzione_e_avviso(self):
+        chiamate = []
+
+        def finto_run(argomenti, **opzioni):
+            chiamate.append((argomenti, opzioni))
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps(
+                {"result": "Ho aggiunto il titolo in index.html.", "is_error": False, "total_cost_usd": 0.12}))
+
+        lavoro = jarvis.LavoroClaudeCode(esegui=finto_run)
+        lavoro.prepara("sito", self.progetto, "aggiungi un titolo", 0)
+        dettagli = lavoro.in_attesa
+        dettagli["inizio"] = 0
+        lavoro.in_corso = dettagli
+        lavoro._esegui(dettagli)          # sincrono, senza thread
+        argomenti, opzioni = chiamate[0]
+        self.assertEqual(opzioni["input"], "aggiungi un titolo")   # il compito passa da stdin
+        self.assertNotIn("aggiungi un titolo", argomenti)
+        self.assertEqual(opzioni["cwd"], str(self.progetto))
+        avviso = lavoro.prossimo_avviso()
+        self.assertIn("ha finito il lavoro su sito", avviso)
+        self.assertIn("index.html", avviso)
+        self.assertIsNone(lavoro.occupato())
+        self.assertEqual(len(list(jarvis.CARTELLA_REPORT.glob("*.md"))), 1)
+
+    def test_errore_riportato(self):
+        lavoro = jarvis.LavoroClaudeCode(esegui=lambda *a, **k: SimpleNamespace(
+            returncode=1, stderr="", stdout=json.dumps({"result": "Not logged in", "is_error": True})))
+        lavoro.prepara("sito", self.progetto, "x", 0)
+        dettagli = lavoro.in_attesa
+        dettagli["inizio"] = 0
+        lavoro._esegui(dettagli)
+        self.assertIn("non e' riuscito", lavoro.prossimo_avviso())
+
+    def test_versione(self):
+        risposta = SimpleNamespace(stdout="2.1.284 (Claude Code)\n")
+        originale = jarvis.subprocess.run
+        jarvis.subprocess.run = lambda *a, **k: risposta
+        try:
+            self.assertEqual(jarvis.versione_claude("claude"), (2, 1, 284))
+        finally:
+            jarvis.subprocess.run = originale
+        self.assertGreaterEqual((2, 1, 284), jarvis.VERSIONE_MINIMA_CLAUDE)
+
+
 class TestStatoSistema(unittest.TestCase):
     def test_giorno_della_settimana(self):
         from datetime import datetime
