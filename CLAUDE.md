@@ -14,7 +14,7 @@ Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolt
 Loop infinito: ascolto → trascrizione → filtro di attenzione (classe `Attenzione`) → comandi gestiti in locale (spegnimento, azzeramento memoria) → altrimenti chiamata all'API con la lista degli strumenti. Se il modello richiede uno strumento, lo script lo esegue localmente e gli restituisce l'esito, ripetendo finché `stop_reason` è diverso da `tool_use` (massimo 6 giri). Con `pause_turn` (web search lato server non concluso) la conversazione viene rimandata senza messaggi aggiuntivi e le due parti della risposta vengono unite in un unico messaggio dell'assistente. Con `max_tokens` vengono tenuti in memoria solo i blocchi di testo, per non lasciare strumenti senza risultato. La risposta finale viene letta ad alta voce. Memoria conversazionale: ultimi 6 scambi completi, archiviati come blocchi interi per non spezzare mai una coppia tool_use / tool_result.
 
 Filtro di attenzione:
-- Sveglio: passano le frasi con "Jarvis" (anche le varianti di trascrizione `jarvi`, `giarvis`, `jervis`) e, per `FINESTRA_ASCOLTO` (8) secondi dopo ogni risposta, anche quelle senza nome (stile Alexa). "Ehi Jarvis" da solo risponde "Sì, Signore?" e apre la finestra. In finestra l'ascolto aspetta solo il tempo rimasto, così una frase iniziata dopo la scadenza non passa senza nome.
+- Sveglio: passano le frasi con "Jarvis" (anche le varianti di trascrizione `jarvi`, `giarvis`, `jervis`) e, per `FINESTRA_ASCOLTO` (8) secondi dopo ogni risposta, anche quelle senza nome (stile Alexa). "Ehi Jarvis" da solo risponde "Mi dica." e apre la finestra. In finestra l'ascolto aspetta solo il tempo rimasto, così una frase iniziata dopo la scadenza non passa senza nome.
 - Addormentato ("Jarvis, dormi" / "vai a dormire" / "pausa"): ignora tutto tranne "Jarvis, svegliati", "ehi Jarvis" e lo spegnimento. L'audio viene comunque trascritto da Google: la pausa non è un microfono spento.
 - Le frasi ignorate non raggiungono mai l'API.
 
@@ -70,11 +70,12 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - Non aggiungere un collegamento di rete tra le due istanze senza una revisione di sicurezza dedicata.
 
 ## 7. Problemi aperti
-- Credito API non ancora caricato sulla Console Anthropic: senza credito le chiamate falliscono con errori di fatturazione della classe 400.
+- Credito API caricato (5 $, ricarica automatica disattivata di proposito: il credito precaricato è il tetto di spesa). Chiave `jarvis-pc` salvata come variabile d'ambiente utente su Windows.
 - `portaudio` e `pyaudio` non ancora installati sul Mac.
 - Permessi macOS non ancora concessi: Microfono per il Terminale, Automazione per `chiudi_app`.
 - Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
 - Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
 - HUD verificato solo su Linux (Chromium headless, schermate desktop e telefono). Mai aperto su Windows né in Edge modalità app.
 - Voce neurale verificata su Windows: l'utente ha scelto it-IT-GiuseppeMultilingualNeural tra le voci maschili multilingue. Grafie di `PRONUNCIA` non ancora ascoltate.
-- Mai eseguite finora: chiamate API reali (su entrambi i sistemi) e tutto il lato Mac.
+- Windows: ciclo completo verificato con chiamate API reali (domanda, strumento, risposta a voce). "Ehi Jarvis" da solo trascritto male da Google ("Ehi ya"): più affidabile "Jarvis" all'inizio di una frase.
+- Mai eseguito finora: tutto il lato Mac.
