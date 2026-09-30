@@ -121,7 +121,8 @@ HUD_ATTIVO = os.environ.get("JARVIS_HUD", "1") != "0"
 HUD_PORTA = int(os.environ.get("JARVIS_HUD_PORTA", "8765"))
 FILE_HUD = Path(__file__).resolve().parent / "hud.html"
 PHRASE_TIME_LIMIT = 15
-PAUSA_FINE_FRASE = float(os.environ.get("JARVIS_PAUSA", "0.6"))   # era 0,8
+# 0,6 s tagliava le frasi lunghe (dettatura di una mail) a chi prende fiato: 1 s.
+PAUSA_FINE_FRASE = float(os.environ.get("JARVIS_PAUSA", "1.0"))
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
 WORKSPACE = Path(
