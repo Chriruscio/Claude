@@ -2064,6 +2064,8 @@ def main() -> None:
                 continue
 
             azione = attenzione.valuta(frase, in_finestra)
+            if azione == "ignora" and risposta_a_conferma(frase, attenzione, time.monotonic()):
+                azione = "comando"
             if azione == "ignora":
                 print("[Ignorata: in pausa]" if attenzione.dorme else "[Ignorata: manca 'Jarvis']")
                 continue
@@ -2104,6 +2106,16 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\n[Interruzione manuale]")
             return
+
+
+def risposta_a_conferma(frase: str, attenzione: "Attenzione", ora: float) -> bool:
+    """
+    Con una conferma in sospeso "conferma"/"annulla" valgono senza dire "Jarvis" per tutto
+    il minuto, non solo negli 8 secondi della finestra: in una prova reale il "conferma"
+    detto dopo la finestra era stato scartato. Mai mentre J.A.R.V.I.S. dorme.
+    """
+    return (not attenzione.dorme and LAVORO.ha_attesa(ora)
+            and _normalizza(frase) in COMANDI_CONFERMA | COMANDI_ANNULLA)
 
 
 def saluto(ora: int | None = None) -> str:

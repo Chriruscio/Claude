@@ -416,6 +416,17 @@ class TestClaudeCode(unittest.TestCase):
         self.assertIsNone(jarvis.LAVORO.occupato())
         self.assertIn("non presente", jarvis.tool_claude_code("altro", "x"))
 
+    def test_conferma_senza_nome_fuori_finestra(self):
+        a = jarvis.Attenzione()
+        self.assertFalse(jarvis.risposta_a_conferma("conferma", a, 0))      # niente in sospeso
+        jarvis.tool_claude_code("sito", "compito")
+        adesso = jarvis.time.monotonic()
+        self.assertTrue(jarvis.risposta_a_conferma("Conferma", a, adesso))
+        self.assertTrue(jarvis.risposta_a_conferma("annulla", a, adesso))
+        self.assertFalse(jarvis.risposta_a_conferma("confermi che piove?", a, adesso))
+        a.dorme = True
+        self.assertFalse(jarvis.risposta_a_conferma("conferma", a, adesso))
+
     def test_conferma_scaduta(self):
         jarvis.tool_claude_code("sito", "compito")
         self.assertFalse(jarvis.LAVORO.ha_attesa(10 ** 12))
