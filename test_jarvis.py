@@ -952,6 +952,138 @@ class TestParolaLocale(unittest.TestCase):
             self.assertEqual(p.scaduti(adesso), ["pasta"])
 
 
+class TestComodita(unittest.TestCase):
+    """Appunti, note, briefing del mattino, finestra che si allunga, pannello dell'HUD."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        cartella = Path(self._tmp.name)
+        self._originali = (jarvis.FILE_NOTE, jarvis.FILE_BRIEFING, jarvis.FILE_MEMORIA, jarvis.PROMEMORIA,
+                           jarvis.WORKSPACE, jarvis.BRIEFING_ATTIVO)
+        jarvis.WORKSPACE = cartella
+        jarvis.FILE_NOTE = cartella / "note.md"
+        jarvis.FILE_BRIEFING = cartella / "ultimo_briefing.txt"
+        jarvis.FILE_MEMORIA = cartella / "memoria.json"
+        jarvis.PROMEMORIA = jarvis.Promemoria(cartella / "promemoria.json")
+        jarvis.BRIEFING_ATTIVO = True
+
+    def tearDown(self):
+        (jarvis.FILE_NOTE, jarvis.FILE_BRIEFING, jarvis.FILE_MEMORIA, jarvis.PROMEMORIA,
+         jarvis.WORKSPACE, jarvis.BRIEFING_ATTIVO) = self._originali
+        self._tmp.cleanup()
+
+    def test_finestra_che_si_allunga(self):
+        self.assertEqual(jarvis.durata_finestra("Preferisce il treno o l'aereo?", 0), jarvis.FINESTRA_DOMANDA)
+        self.assertEqual(jarvis.durata_finestra('Ha detto "domani?"', 0), jarvis.FINESTRA_DOMANDA)
+        self.assertEqual(jarvis.durata_finestra("Fatto.", 3), jarvis.FINESTRA_CONVERSAZIONE)
+        self.assertEqual(jarvis.durata_finestra("Fatto.", 1), jarvis.FINESTRA_ASCOLTO)
+        self.assertEqual(jarvis.durata_finestra("", 0), jarvis.FINESTRA_ASCOLTO)
+
+    def test_conta_i_comandi_recenti(self):
+        a = jarvis.Attenzione()
+        for t in (0, 50, 100, 110):
+            a.segna_comando(t)
+        self.assertEqual(a.comandi_recenti(110), 4)
+        self.assertEqual(a.comandi_recenti(200), 2)   # 0 e 50 sono fuori dai 2 minuti
+        a.apri_finestra(10, 20)
+        self.assertTrue(a.finestra_aperta(29))
+        self.assertFalse(a.finestra_aperta(31))
+
+    def test_briefing_una_volta_al_mattino(self):
+        from datetime import datetime
+        mattina = datetime(2026, 10, 1, 8, 30)
+        self.assertTrue(jarvis.briefing_da_fare(mattina))
+        jarvis.segna_briefing(mattina)
+        self.assertFalse(jarvis.briefing_da_fare(mattina.replace(hour=10)))
+        self.assertTrue(jarvis.briefing_da_fare(datetime(2026, 10, 2, 7, 0)))    # il giorno dopo
+        self.assertFalse(jarvis.briefing_da_fare(datetime(2026, 10, 2, 15, 0)))  # pomeriggio
+        jarvis.BRIEFING_ATTIVO = False
+        self.assertFalse(jarvis.briefing_da_fare(datetime(2026, 10, 3, 8, 0)))
+
+    def test_note(self):
+        self.assertEqual(jarvis.tool_leggi_note(), "Nessuna nota ancora.")
+        for i in range(7):
+            jarvis.tool_prendi_nota(f"nota numero {i}")
+        esito = jarvis.tool_leggi_note(3)
+        self.assertIn("Ultime 3 note su 7", esito)
+        self.assertIn("nota numero 6", esito)
+        self.assertNotIn("nota numero 3", esito)
+        self.assertEqual(jarvis.tool_prendi_nota("   "), "Niente da annotare.")
+
+    def test_appunti_windows_testo_mai_nello_script(self):
+        chiamate = []
+
+        def finto(script, env_extra=None, timeout=30, encoding=None):
+            chiamate.append((script, env_extra))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        testo = "'; Remove-Item C:\\ -Recurse; '"
+        with mock.patch.object(jarvis, "IS_WIN", True), mock.patch.object(jarvis, "IS_MAC", False), \
+                mock.patch.object(jarvis, "_powershell", finto):
+            esito = jarvis.tool_copia_negli_appunti(testo)
+        self.assertIn("Copiato negli appunti", esito)
+        script, env = chiamate[0]
+        self.assertEqual(script, jarvis.PS_SCRIVI_APPUNTI)
+        self.assertEqual(env, {"JARVIS_APPUNTI": testo.strip()})
+
+    def test_appunti_mac(self):
+        visti = {}
+
+        def finto(argomenti, **k):
+            visti["argomenti"], visti["input"] = argomenti, k.get("input")
+            return SimpleNamespace(returncode=0, stdout="Ciao è così\n".encode("utf-8"), stderr=b"")
+
+        with mock.patch.object(jarvis, "IS_WIN", False), mock.patch.object(jarvis, "IS_MAC", True), \
+                mock.patch.object(jarvis.subprocess, "run", finto):
+            self.assertIn("Ciao è così", jarvis.tool_leggi_appunti())
+            jarvis.tool_copia_negli_appunti("Perché sì")
+        self.assertEqual(visti["argomenti"], ["pbcopy"])
+        self.assertEqual(visti["input"], "Perché sì".encode("utf-8"))
+
+    def test_appunti_vuoti(self):
+        vuoto = SimpleNamespace(returncode=0, stdout="  \r\n", stderr="")
+        with mock.patch.object(jarvis, "IS_WIN", True), mock.patch.object(jarvis, "IS_MAC", False), \
+                mock.patch.object(jarvis, "_powershell", lambda *a, **k: vuoto):
+            self.assertIn("vuoti", jarvis.tool_leggi_appunti())
+
+    def test_appunti_e_note_nella_barriera(self):
+        self.assertTrue({"leggi_appunti", "leggi_note"} <= jarvis.STRUMENTI_CHE_LEGGONO)
+        # voluto: "correggi quello che ho copiato" legge e riscrive gli appunti nello stesso turno
+        self.assertNotIn("copia_negli_appunti", jarvis.STRUMENTI_CHE_AGISCONO)
+        nomi = {t["name"] for t in jarvis.TOOLS_LOCALI}
+        self.assertTrue({"leggi_appunti", "copia_negli_appunti", "prendi_nota", "leggi_note"} <= nomi)
+
+    def test_correggi_quello_che_ho_copiato(self):
+        """Legge e riscrive gli appunti nello stesso turno; una mail invece resta bloccata."""
+        client = ClientFinto(
+            _risposta("tool_use", _tool_use("leggi_appunti", {}, "a")),
+            _risposta("tool_use", _tool_use("copia_negli_appunti", {"testo": "Buongiorno, ecco il file."}, "b"),
+                      _tool_use("prepara_mail", {"oggetto": "x", "testo": "y"}, "c")),
+            _risposta("end_turn", _testo("Fatto, e' negli appunti.")),
+        )
+        copiati, mail = [], []
+        esecutori = dict(jarvis.ESECUTORI,
+                         leggi_appunti=lambda: "Testo copiato dall'utente:\nbuongiono ecco il fail",
+                         copia_negli_appunti=lambda testo: copiati.append(testo) or "Copiato negli appunti.",
+                         prepara_mail=lambda **k: mail.append(k) or "Bozza aperta.")
+        with mock.patch.object(jarvis, "ESECUTORI", esecutori):
+            jarvis.chiedi_a_claude(client, [], "correggi quello che ho copiato")
+        self.assertEqual(copiati, ["Buongiorno, ecco il file."])
+        self.assertEqual(mail, [])   # barriera: dopo aver letto gli appunti niente mail nello stesso turno
+
+    def test_riepilogo_per_l_hud(self):
+        from datetime import datetime, timedelta
+        adesso = datetime(2026, 10, 1, 9, 0)
+        jarvis.PROMEMORIA.aggiungi(adesso + timedelta(hours=1), "pasta")
+        jarvis.PROMEMORIA.aggiungi(adesso + timedelta(days=1), "commercialista")
+        jarvis.PROMEMORIA.aggiungi(adesso + timedelta(days=5), "dentista")
+        jarvis.tool_ricorda("Abito a Milano")
+        r = jarvis.riepilogo_ricordi(adesso)
+        self.assertEqual([p["quando"] for p in r["promemoria"]], ["10:00", "domani 09:00", "06/10 09:00"])
+        self.assertEqual(r["memoria"], ["Abito a Milano"])
+        self.assertEqual((r["promemoria_totale"], r["memoria_totale"]), (3, 1))
+
+
 class TestMail(unittest.TestCase):
     def test_indirizzi(self):
         self.assertEqual(jarvis.indirizzi_validi(""), [])

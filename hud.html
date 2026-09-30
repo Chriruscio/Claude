@@ -141,6 +141,19 @@
     box-shadow: 0 0 8px var(--accento);
     transition: width 0.8s ease, background 0.6s;
   }
+  .pannello h2.seconda { margin-top: 22px; }
+  .elenco { list-style: none; margin: 4px 0 12px; font-size: 12px; line-height: 1.45; }
+  .elenco li { display: flex; gap: 8px; margin-bottom: 5px; }
+  .elenco .quando {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accento);
+    white-space: nowrap;
+    padding-top: 2px;
+  }
+  .elenco .cosa { overflow-wrap: anywhere; color: #b9cad6; }
+  .elenco li.vuoto { color: var(--testo-tenue); font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; }
+
   .misura.alto .barra span { background: var(--pericolo); box-shadow: 0 0 8px var(--pericolo); }
   .misura.alto .valore { color: var(--pericolo); }
 
@@ -270,6 +283,11 @@
         <div class="barra"><span></span></div>
         <div class="nota"></div>
       </div>
+
+      <h2 class="seconda">PROMEMORIA</h2>
+      <ul class="elenco" id="l-promemoria" aria-label="Promemoria attivi"></ul>
+      <h2 class="seconda">RICORDA</h2>
+      <ul class="elenco" id="l-memoria" aria-label="Cose che Jarvis ricorda"></ul>
     </section>
 
     <div class="centro">
@@ -320,6 +338,7 @@
   const DETTAGLI = {
     ascolto: "dica “Jarvis”",
     dorme: "dica “Jarvis, svegliati”",
+    attento: "parli pure",
     offline: "J.A.R.V.I.S. non risponde",
   };
   // Ritmo di ogni stato: velocita' di rotazione, luminosita' di base, respiro.
@@ -368,10 +387,11 @@
   function mostraStorico(voci) {
     storico.replaceChildren(...voci.slice(-6).map((v) => {
       const riga = document.createElement("li");
-      riga.className = v.chi === "jarvis" || v.chi === "claude" ? v.chi : "utente";
+      // "appunti" (testo messo negli appunti) si scorre come il risultato di Claude Code
+      riga.className = { jarvis: "jarvis", claude: "claude", appunti: "claude" }[v.chi] || "utente";
       const chi = document.createElement("span");
       chi.className = "chi";
-      chi.textContent = { jarvis: "JARVIS", claude: "CLAUDE" }[v.chi] || "TU";
+      chi.textContent = { jarvis: "JARVIS", claude: "CLAUDE", appunti: "APPUNTI" }[v.chi] || "TU";
       const testo = document.createElement("span");
       testo.className = "testo";
       testo.textContent = v.testo;
@@ -426,6 +446,43 @@
     }
   }
 
+  // Promemoria e memoria: testi dettati dall'utente o scritti dal modello, quindi textContent.
+  function riempiElenco(id, voci, vuoto, altri) {
+    const elenco = document.getElementById(id);
+    const righe = voci.map((v) => {
+      const riga = document.createElement("li");
+      if (v.quando) {
+        const quando = document.createElement("span");
+        quando.className = "quando";
+        quando.textContent = v.quando;
+        riga.append(quando);
+      }
+      const cosa = document.createElement("span");
+      cosa.className = "cosa";
+      cosa.textContent = v.testo;
+      riga.append(cosa);
+      return riga;
+    });
+    if (!righe.length || altri > 0) {
+      const nota = document.createElement("li");
+      nota.className = "vuoto";
+      nota.textContent = righe.length ? "e altri " + altri : vuoto;
+      righe.push(nota);
+    }
+    elenco.replaceChildren(...righe);
+  }
+
+  let ricordiMostrati = "";
+  function mostraRicordi(r) {
+    if (!r || !r.promemoria) return;
+    const firma = JSON.stringify(r);
+    if (firma === ricordiMostrati) return;   // niente da ridisegnare ogni 300 ms
+    ricordiMostrati = firma;
+    riempiElenco("l-promemoria", r.promemoria, "nessuno attivo", r.promemoria_totale - r.promemoria.length);
+    riempiElenco("l-memoria", r.memoria.map((testo) => ({ testo })), "niente per ora",
+      r.memoria_totale - r.memoria.length);
+  }
+
   function mostraClaudeCode(c) {
     if (!c) return;
     if (c.fase === "lavoro") {
@@ -453,6 +510,11 @@
       mostraConsumi(dati.consumi);
       mostraSistema(dati.sistema);
       mostraClaudeCode(dati.claude_code);
+      mostraRicordi(dati.ricordi);
+      if (dati.attivazione) {
+        DETTAGLI.ascolto = "dica “" + dati.attivazione + "”";
+        DETTAGLI.dorme = "dica “" + dati.attivazione + ", svegliati”";
+      }
       if (dati.voce && dati.voce.id !== voce.id) voce = dati.voce;
       if (dati.versione !== versioneMostrata) {
         versioneMostrata = dati.versione;
