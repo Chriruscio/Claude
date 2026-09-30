@@ -22,27 +22,10 @@ import sys
 import zlib
 from pathlib import Path
 
-PACCHETTI = ["anthropic", "SpeechRecognition", "pyaudio", "edge-tts", "miniaudio", "psutil"]
+PACCHETTI = ["anthropic", "SpeechRecognition", "pyaudio", "edge-tts", "miniaudio", "psutil", "pywin32"]
 CARTELLA_CODICE = Path(__file__).resolve().parent
 CARTELLA_JARVIS = Path.home() / "Jarvis"          # fuori dalla cartella del codice: sopravvive agli aggiornamenti
 FILE_ICONA = CARTELLA_JARVIS / "jarvis.ico"
-SENZA_FINESTRA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-# Script PowerShell costante: i percorsi arrivano da variabili d'ambiente, mai interpolati.
-PS_COLLEGAMENTO = (
-    "$ErrorActionPreference = 'Stop'; "
-    "$cartella = [Environment]::GetFolderPath($env:JARVIS_DOVE); "
-    "$shell = New-Object -ComObject WScript.Shell; "
-    "$lnk = $shell.CreateShortcut((Join-Path $cartella 'Jarvis.lnk')); "
-    "$lnk.TargetPath = $env:JARVIS_TARGET; "
-    "$lnk.Arguments = '\"' + $env:JARVIS_SCRIPT + '\"'; "
-    "$lnk.WorkingDirectory = $env:JARVIS_CARTELLA; "
-    "$lnk.IconLocation = $env:JARVIS_ICONA; "
-    "$lnk.Description = 'J.A.R.V.I.S. - assistente vocale'; "
-    "$lnk.Save(); "
-    "Join-Path $cartella 'Jarvis.lnk'"
-)
-
 
 # ==========================================================================
 # ICONA: disegnata qui, senza file esterni (anello e nucleo azzurri)
@@ -120,23 +103,33 @@ def pythonw() -> Path:
 
 
 def crea_collegamento(dove: str) -> Path | None:
-    """dove: 'Desktop' oppure 'Startup' (cartella Esecuzione automatica)."""
-    env = dict(os.environ)
-    env.update({
-        "JARVIS_DOVE": dove,
-        "JARVIS_TARGET": str(pythonw()),
-        "JARVIS_SCRIPT": str(CARTELLA_CODICE / "jarvis.py"),
-        "JARVIS_CARTELLA": str(CARTELLA_CODICE),
-        "JARVIS_ICONA": str(FILE_ICONA),
-    })
-    esito = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", PS_COLLEGAMENTO],
-        capture_output=True, text=True, errors="replace", env=env, creationflags=SENZA_FINESTRA,
-    )
-    if esito.returncode != 0:
-        print(f"  Errore: {esito.stderr.strip()[:300]}")
+    """
+    dove: 'Desktop' oppure 'Startup' (cartella Esecuzione automatica).
+    Il collegamento si crea da Python con il componente WScript.Shell di Windows
+    (tramite pywin32), non con un comando PowerShell: quello veniva bloccato con
+    "Accesso negato", probabilmente dall'antivirus, perche' creare collegamenti
+    da PowerShell e' una tecnica tipica dei programmi malevoli.
+    """
+    try:
+        import pywintypes
+        import win32com.client
+    except ImportError:
+        print("  Manca pywin32. Esegui:  py -3.13 -m pip install pywin32  e rilancia.")
         return None
-    return Path(esito.stdout.strip())
+    try:
+        shell = win32com.client.Dispatch("WScript.Shell")
+        percorso = Path(shell.SpecialFolders(dove)) / "Jarvis.lnk"
+        collegamento = shell.CreateShortcut(str(percorso))
+        collegamento.TargetPath = str(pythonw())
+        collegamento.Arguments = f'"{CARTELLA_CODICE / "jarvis.py"}"'
+        collegamento.WorkingDirectory = str(CARTELLA_CODICE)
+        collegamento.IconLocation = str(FILE_ICONA)
+        collegamento.Description = "J.A.R.V.I.S. - assistente vocale"
+        collegamento.Save()
+    except (pywintypes.com_error, OSError) as e:
+        print(f"  Impossibile creare il collegamento: {e}")
+        return None
+    return percorso
 
 
 def crea_icone() -> None:
@@ -169,11 +162,16 @@ def main() -> None:
               "Per il microfono serve la 3.13: rilancia con  py -3.13 installa.py")
         if input("Continuo lo stesso? (s/n): ").strip().lower() not in ("s", "si", "sì"):
             return
+    if "--collegamenti" in sys.argv:
+        crea_icone()
+        chiedi_avvio_automatico()
+        return
     print(f"Installazione di J.A.R.V.I.S. dalla cartella {CARTELLA_CODICE}")
     if installa_pacchetti():
         controlla_chiave()
-        crea_icone()
-        chiedi_avvio_automatico()
+        # Nuovo processo: un pacchetto appena installato (pywin32) non sempre e'
+        # importabile nel processo che l'ha installato.
+        subprocess.run([sys.executable, str(Path(__file__).resolve()), "--collegamenti"])
         print("\nTutto pronto.")
 
 

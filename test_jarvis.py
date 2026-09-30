@@ -324,11 +324,10 @@ class TestInstallatore(unittest.TestCase):
         self.assertEqual(struct.unpack("<HHH", ico[:6]), (0, 1, 1))
         self.assertEqual(ico[22:], png)
 
-    def test_script_powershell_costante(self):
+    def test_niente_powershell_per_i_collegamenti(self):
         import installa
-        # i percorsi passano da variabili d'ambiente, non sono scritti nello script
-        self.assertIn("$env:JARVIS_TARGET", installa.PS_COLLEGAMENTO)
-        self.assertNotIn(str(installa.CARTELLA_CODICE), installa.PS_COLLEGAMENTO)
+        self.assertFalse(hasattr(installa, "PS_COLLEGAMENTO"))
+        self.assertIn("pywin32", installa.PACCHETTI)
 
 
 class TestStatoSistema(unittest.TestCase):
