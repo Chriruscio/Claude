@@ -8,6 +8,7 @@ Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolt
 - `hud.html` — la pagina dell'HUD: sfera di particelle 3D disegnata su canvas (nessuna libreria esterna) con anelli e quadrante, che segue lo stato e il volume della voce; onda della voce; pannello SISTEMA (CPU, memoria, disco, batteria) e pannello SESSIONE (token, speso, credito); ultime 6 battute. Legge `/stato` ogni 300 ms e inserisce i testi solo con `textContent`.
 - `~/Jarvis/consumi.json` — credito indicato dall'utente e consumi sommati da allora (token, ricerche, richieste, spesa stimata). Fuori dalla sandbox.
 - `app_windows.json` / `app_mac.json` (facoltativi, non versionati) — elenco personale di app, accanto a `jarvis.py`. Si aggiunge all'elenco di base e ne sostituisce le voci con lo stesso nome. Se il file ha errori, J.A.R.V.I.S. lo segnala all'avvio e usa solo l'elenco di base. Esempio da copiare: `app_windows.esempio.json`.
+- `installa.py` — installazione su Windows (`py -3.13 installa.py`): pacchetti pip, controllo della chiave, icona `~/Jarvis/jarvis.ico` disegnata in Python, collegamento "Jarvis" sul desktop che lancia `pythonw.exe jarvis.py` (nessuna finestra), a richiesta collegamento nella cartella Esecuzione automatica. Collegamenti creati con uno script PowerShell costante; i percorsi passano da variabili d'ambiente.
 - `test_jarvis.py` — test della logica indipendente dall'hardware (sandbox, comandi locali, ciclo di dialogo con client finto). `python3 -m unittest test_jarvis -v`.
 
 ## 3. Logica principale
@@ -80,4 +81,7 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - HUD nuovo (sfera 3D, pannelli, onda) verificato solo su Linux: Chromium headless, schermate desktop e telefono, circa 60 fotogrammi al secondo senza GPU. Segnali sonori e sincronia voce/animazione mai sentiti né visti su Windows.
 - Voce neurale verificata su Windows: l'utente ha scelto it-IT-GiuseppeMultilingualNeural tra le voci maschili multilingue. Grafie di `PRONUNCIA` non ancora ascoltate.
 - Windows: ciclo completo verificato con chiamate API reali (domanda, strumento, risposta a voce). "Ehi Jarvis" da solo trascritto male da Google ("Ehi ya"): più affidabile "Jarvis" all'inizio di una frase.
+- `installa.py` mai eseguito su Windows: icona verificata su Linux, collegamenti no.
+- Claude Code dentro J.A.R.V.I.S.: progettato (solo cartelle elencate a mano, conferma vocale riconosciuta localmente, `--restricted` con soli strumenti sui file, compito via stdin, ambiente senza `ANTHROPIC_API_KEY` perché in `-p` la chiave vince sempre sull'abbonamento) ma non implementato: la modifica è stata bloccata dal controllo di sicurezza dell'ambiente di sviluppo. Decisione rimandata all'utente.
+- Da verificare: con `ANTHROPIC_API_KEY` impostata a livello utente, il Claude Code interattivo sul PC può usare la chiave (e il credito) invece dell'abbonamento, se l'utente l'ha approvata. Controllare con `/status`.
 - Mai eseguito finora: tutto il lato Mac.

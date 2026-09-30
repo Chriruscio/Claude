@@ -313,6 +313,24 @@ class TestHudVivo(unittest.TestCase):
         self.assertEqual(dati["sistema"]["cpu"], 12.5)
 
 
+class TestInstallatore(unittest.TestCase):
+    def test_icona_valida(self):
+        import struct
+        import installa
+        png = installa.disegna_icona(32)
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(struct.unpack(">II", png[16:24]), (32, 32))
+        ico = installa.icona_ico(png)
+        self.assertEqual(struct.unpack("<HHH", ico[:6]), (0, 1, 1))
+        self.assertEqual(ico[22:], png)
+
+    def test_script_powershell_costante(self):
+        import installa
+        # i percorsi passano da variabili d'ambiente, non sono scritti nello script
+        self.assertIn("$env:JARVIS_TARGET", installa.PS_COLLEGAMENTO)
+        self.assertNotIn(str(installa.CARTELLA_CODICE), installa.PS_COLLEGAMENTO)
+
+
 class TestStatoSistema(unittest.TestCase):
     def test_giorno_della_settimana(self):
         from datetime import datetime
