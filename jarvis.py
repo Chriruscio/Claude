@@ -376,7 +376,15 @@ def riepilogo_tempi() -> str:
         chiamate = TEMPI.get("chiamate", 1)
         pezzi.append(f"Claude {TEMPI['claude']:.1f} s" + (f" ({chiamate} chiamate)" if chiamate > 1 else ""))
     if "voce" in TEMPI:
-        pezzi.append(f"voce pronta in {TEMPI['voce']:.1f} s")
+        dettaglio = TEMPI.get("voce_dettaglio") or {}
+        if dettaglio.get("da_cache"):
+            nota = " (dalla memoria)"
+        elif "primo" in dettaglio:
+            nota = (f" (primo audio da Microsoft dopo {dettaglio['primo']:.1f} s, "
+                    f"frase completa {dettaglio.get('totale', 0):.1f} s)")
+        else:
+            nota = ""
+        pezzi.append(f"voce pronta in {TEMPI['voce']:.1f} s{nota}")
     return "[Tempi: " + " · ".join(pezzi) + "]" if pezzi else ""
 URL_HUD: str | None = None
 
@@ -612,12 +620,71 @@ def per_la_voce(testo: str, multilingue: bool = False) -> str:
 _neurale_attiva = NEURALE_INSTALLATA and VOCE_NEURALE not in ("", "0")
 
 
-async def _sintetizza(testo: str) -> bytes:
+async def _sintetizza(testo: str, misure: dict | None = None) -> bytes:
+    """misure, se dato, riceve 'primo' (secondi al primo audio) e 'totale'."""
+    inizio = time.monotonic()
     audio = bytearray()
     async for pezzo in edge_tts.Communicate(testo, VOCE_NEURALE).stream():
         if pezzo["type"] == "audio":
+            if misure is not None and "primo" not in misure:
+                misure["primo"] = time.monotonic() - inizio
             audio += pezzo["data"]
+    if misure is not None:
+        misure["totale"] = time.monotonic() - inizio
     return bytes(audio)
+
+
+# Memoria delle frasi brevi gia' pronunciate (su disco, per voce): "Mi dica", "Annullato",
+# "Avviato su prova"... ripartono subito invece di chiedere di nuovo l'audio a Microsoft.
+CARTELLA_CACHE_VOCE = CARTELLA_JARVIS / "voce_cache"
+MAX_CARATTERI_CACHE = 80
+MAX_FILE_CACHE = 300
+FRASI_FISSE = [
+    "Mi dica.", "Di nuovo operativo.", "Annullato.",
+    "Modalita' riposo. Mi chiami quando serve.",
+    "Disattivazione dei sistemi. A presto, Signore.",
+    "Buongiorno. Tutti i sistemi sono operativi.",
+    "Buon pomeriggio. Tutti i sistemi sono operativi.",
+    "Buonasera. Tutti i sistemi sono operativi.",
+]
+
+
+def _file_cache_voce(pezzo: str) -> Path:
+    import hashlib
+    chiave = hashlib.sha256(f"{VOCE_NEURALE}|{pezzo}".encode("utf-8")).hexdigest()[:32]
+    return CARTELLA_CACHE_VOCE / f"{chiave}.mp3"
+
+
+def audio_del_pezzo(pezzo: str, misure: dict | None = None) -> bytes:
+    """Audio mp3 di un pezzo: dalla memoria se c'e', altrimenti dal servizio (e poi in memoria)."""
+    file = _file_cache_voce(pezzo)
+    if len(pezzo) <= MAX_CARATTERI_CACHE and file.is_file():
+        if misure is not None:
+            misure["da_cache"] = True
+        return file.read_bytes()
+    mp3 = asyncio.run(asyncio.wait_for(_sintetizza(pezzo, misure), timeout=15))
+    if mp3 and len(pezzo) <= MAX_CARATTERI_CACHE:
+        try:
+            CARTELLA_CACHE_VOCE.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(mp3)
+        except OSError:
+            pass
+    return mp3
+
+
+def prepara_frasi_fisse() -> None:
+    """In sottofondo all'avvio: le frasi fisse sono pronte prima che servano."""
+    try:
+        if CARTELLA_CACHE_VOCE.is_dir():
+            file = sorted(CARTELLA_CACHE_VOCE.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+            for vecchio in file[:-MAX_FILE_CACHE]:
+                vecchio.unlink(missing_ok=True)
+        multilingue = "Multilingual" in VOCE_NEURALE
+        for frase in FRASI_FISSE:
+            for pezzo in dividi_frasi(per_la_voce(frase, multilingue=multilingue)):
+                audio_del_pezzo(pezzo)
+    except Exception as e:   # e' solo un'accelerazione: se fallisce, pazienza
+        print(f"[Preparazione delle frasi fisse non riuscita: {type(e).__name__}: {e}]")
 
 
 def inviluppo(campioni, frequenza: int, passo_ms: int = 50) -> list[float]:
@@ -666,7 +733,10 @@ def _parla_neurale(testo: str) -> None:
     def sintetizza_in_ordine() -> None:
         for i, pezzo in enumerate(pezzi):
             try:
-                mp3 = asyncio.run(asyncio.wait_for(_sintetizza(pezzo), timeout=15))
+                misure: dict = {}
+                mp3 = audio_del_pezzo(pezzo, misure)
+                if i == 0:
+                    TEMPI["voce_dettaglio"] = misure
                 if not mp3:
                     raise RuntimeError("nessun audio ricevuto")
             except Exception as e:
@@ -1312,8 +1382,10 @@ ISTRUZIONE_CLAUDE_CODE = (
 )
 ISTRUZIONE_LETTURA = (
     "Rispondi alla richiesta descritta nel testo ricevuto in ingresso leggendo e cercando i "
-    "file della cartella corrente, senza modificare nulla. Rispondi in italiano, in poche "
-    "frasi semplici adatte a essere lette ad alta voce, citando i nomi dei file utili."
+    "file della cartella corrente, senza modificare nulla. La risposta verra' letta ad alta "
+    "voce: in italiano, al massimo quattro frasi brevi, nessuna premessa ne' spiegazione di "
+    "come hai lavorato, niente elenchi lunghi. Vai subito al contenuto richiesto; se i "
+    "risultati sono molti, di' i piu' importanti e quanti sono in tutto."
 )
 
 # Copia di sicurezza prima di ogni lavoro che modifica: "Jarvis, annulla l'ultimo lavoro".
@@ -1605,9 +1677,16 @@ class LavoroClaudeCode:
                       f"{_prime_frasi(esito_testo)} Se non va bene, dica: annulla l'ultimo lavoro.")
         with self._lock:
             self.in_corso = None
-            self.avvisi.append(avviso)
+            # a voce solo l'inizio, nella pagina il testo completo
+            self.avvisi.append((avviso, _prime_frasi(esito_testo, 3000) or avviso))
 
     def prossimo_avviso(self) -> str | None:
+        """Solo la parte da leggere a voce."""
+        prossimo = self.prossimo_avviso_completo()
+        return prossimo[0] if prossimo else None
+
+    def prossimo_avviso_completo(self) -> tuple[str, str] | None:
+        """(testo da leggere a voce, testo completo per la pagina)."""
         with self._lock:
             return self.avvisi.popleft() if self.avvisi else None
 
@@ -1930,6 +2009,8 @@ def main() -> None:
         avvia_monitor_sistema()
 
     configura_claude_code()
+    if _neurale_attiva:
+        threading.Thread(target=prepara_frasi_fisse, daemon=True).start()
 
     client = anthropic.Anthropic()
     orecchie = Orecchie()
@@ -1956,11 +2037,12 @@ def main() -> None:
 
     while True:
         try:
-            avviso = LAVORO.prossimo_avviso()
-            if avviso:
-                HUD.aggiungi("claude", avviso)
+            prossimo = LAVORO.prossimo_avviso_completo()
+            if prossimo:
+                parlato, completo = prossimo
+                HUD.aggiungi("claude", completo)
                 suona("attivo")
-                parla(avviso)
+                parla(parlato)
                 attenzione.apri_finestra(time.monotonic())
                 continue
 

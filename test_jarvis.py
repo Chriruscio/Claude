@@ -533,6 +533,32 @@ class TestVelocita(unittest.TestCase):
         self.assertEqual(jarvis.dividi_frasi("Ciao."), ["Ciao."])
         self.assertEqual(jarvis.dividi_frasi(""), [])
 
+    def test_memoria_della_voce(self):
+        chiamate = []
+
+        async def finta_sintesi(testo, misure=None):
+            chiamate.append(testo)
+            if misure is not None:
+                misure.update(primo=0.4, totale=0.9)
+            return b"mp3-finto"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            originali = (jarvis.CARTELLA_CACHE_VOCE, jarvis._sintetizza)
+            jarvis.CARTELLA_CACHE_VOCE = Path(tmp)
+            jarvis._sintetizza = finta_sintesi
+            try:
+                misure = {}
+                self.assertEqual(jarvis.audio_del_pezzo("Mi dica.", misure), b"mp3-finto")
+                self.assertEqual(misure, {"primo": 0.4, "totale": 0.9})
+                misure = {}
+                self.assertEqual(jarvis.audio_del_pezzo("Mi dica.", misure), b"mp3-finto")
+                self.assertTrue(misure.get("da_cache"))
+                self.assertEqual(chiamate, ["Mi dica."])            # la seconda volta niente servizio
+                jarvis.audio_del_pezzo("x" * 200)                   # frasi lunghe: mai in memoria
+                self.assertEqual(len(list(Path(tmp).glob("*.mp3"))), 1)
+            finally:
+                jarvis.CARTELLA_CACHE_VOCE, jarvis._sintetizza = originali
+
     def test_riepilogo_tempi(self):
         jarvis.TEMPI.clear()
         jarvis.TEMPI.update({"trascrizione": 0.62, "claude": 2.4, "chiamate": 2, "voce": 0.5})
