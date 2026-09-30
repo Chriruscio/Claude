@@ -22,7 +22,7 @@ import sys
 import zlib
 from pathlib import Path
 
-PACCHETTI = ["anthropic", "SpeechRecognition", "pyaudio", "edge-tts", "miniaudio", "psutil", "pywin32"]
+PACCHETTI = ["anthropic", "SpeechRecognition", "pyaudio", "edge-tts", "miniaudio", "psutil", "pywin32", "pillow"]
 CARTELLA_CODICE = Path(__file__).resolve().parent
 CARTELLA_JARVIS = Path.home() / "Jarvis"          # fuori dalla cartella del codice: sopravvive agli aggiornamenti
 FILE_ICONA = CARTELLA_JARVIS / "jarvis.ico"

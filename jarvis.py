@@ -7,11 +7,11 @@ dichiarati in TOOLS_LOCALI, e lettura e scrittura file sono confinate a una sand
 
 Requisiti macOS:
     brew install portaudio
-    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil pillow
     export ANTHROPIC_API_KEY="sk-ant-..."
 
 Requisiti Windows (PowerShell):
-    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil pillow
     setx ANTHROPIC_API_KEY "sk-ant-..."     (poi riaprire il terminale)
 
 Avvio:
@@ -371,6 +371,8 @@ TEMPI: dict = {}
 
 def riepilogo_tempi() -> str:
     pezzi = []
+    if "prima_parola" in TEMPI:
+        pezzi.append(f"PRIMA PAROLA dopo {TEMPI['prima_parola']:.1f} s")
     if "trascrizione" in TEMPI:
         pezzi.append(f"trascrizione {TEMPI['trascrizione']:.1f} s")
     if "claude" in TEMPI:
@@ -825,6 +827,133 @@ def parla(testo: str) -> None:
     _parla_sistema(per_la_voce(testo))
 
 
+_FINE_FRASE = re.compile(r"[.!?;:](?=\s)|\n")
+
+
+def pezzi_pronti(buffer: str, gia_emessi: int) -> tuple[list[str], str]:
+    """
+    Dal testo arrivato finora stacca i pezzi completi da leggere: si taglia solo a fine
+    frase seguita da uno spazio (cosi' "10.00" o "3.5" non vengono spezzati). Il primo
+    pezzo puo' essere corto, per partire presto; i successivi almeno ~60 caratteri.
+    """
+    pezzi = []
+    while True:
+        minimo = 20 if gia_emessi + len(pezzi) == 0 else 60
+        taglio = None
+        for trovato in _FINE_FRASE.finditer(buffer):
+            if len(buffer[:trovato.end()].strip()) >= minimo:
+                taglio = trovato.end()
+                break
+        if taglio is None:
+            return pezzi, buffer
+        pezzo = buffer[:taglio].strip()
+        if pezzo:
+            pezzi.append(pezzo)
+        buffer = buffer[taglio:]
+
+
+class ParlatoInFlusso:
+    """
+    Legge ad alta voce una risposta mentre arriva da Claude. Due thread: uno prepara
+    l'audio dei pezzi (dalla memoria o da Microsoft), l'altro li suona in ordine.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self.emessi: list[str] = []
+        self.parlato = False
+        self._multilingue = "Multilingual" in VOCE_NEURALE
+        self._testi: queue.Queue = queue.Queue()
+        self._audio: queue.Queue = queue.Queue(maxsize=2)
+        self._voce_neurale_ok = True
+        self._inizio = time.monotonic()
+        self._sintesi = threading.Thread(target=self._ciclo_sintesi, daemon=True)
+        self._riproduzione = threading.Thread(target=self._ciclo_riproduzione, daemon=True)
+        self._sintesi.start()
+        self._riproduzione.start()
+
+    def aggiungi(self, testo: str) -> None:
+        self._buffer += testo
+        pezzi, self._buffer = pezzi_pronti(self._buffer, len(self.emessi))
+        for pezzo in pezzi:
+            self._emetti(pezzo)
+
+    def _emetti(self, pezzo: str) -> None:
+        if not self.emessi:
+            self._inizio = time.monotonic()
+        self.emessi.append(pezzo)
+        self._testi.put(pezzo)
+
+    def chiudi(self) -> bool:
+        """Legge il resto e aspetta la fine. True se ha detto qualcosa."""
+        if self._buffer.strip():
+            self._emetti(self._buffer.strip())
+        self._buffer = ""
+        self._testi.put(None)
+        self._sintesi.join(timeout=300)
+        self._riproduzione.join(timeout=300)
+        return self.parlato
+
+    def _ciclo_sintesi(self) -> None:
+        while True:
+            pezzo = self._testi.get()
+            if pezzo is None:
+                self._audio.put(None)
+                return
+            if self._voce_neurale_ok:
+                try:
+                    misure: dict = {}
+                    mp3 = audio_del_pezzo(per_la_voce(pezzo, multilingue=self._multilingue), misure)
+                    if not mp3:
+                        raise RuntimeError("nessun audio ricevuto")
+                    if "voce_dettaglio" not in TEMPI:
+                        TEMPI["voce_dettaglio"] = misure
+                    self._audio.put(("mp3", mp3))
+                    continue
+                except Exception as e:
+                    self._voce_neurale_ok = False
+                    print(f"[Voce neurale non disponibile ({type(e).__name__}: {e}): "
+                          "continuo con la voce di sistema]")
+            self._audio.put(("sistema", pezzo))
+
+    def _ciclo_riproduzione(self) -> None:
+        uscita, flusso = None, None
+        try:
+            while True:
+                elemento = self._audio.get()
+                if elemento is None:
+                    return
+                tipo, dato = elemento
+                if not self.parlato:
+                    TEMPI["voce"] = time.monotonic() - self._inizio
+                    if "_fine_parlato" in TEMPI:
+                        TEMPI["prima_parola"] = time.monotonic() - TEMPI["_fine_parlato"]
+                    HUD.imposta("parla")
+                self.parlato = True
+                if tipo == "sistema":
+                    _parla_sistema(per_la_voce(dato))
+                    continue
+                suono = miniaudio.decode(
+                    dato, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=24000
+                )
+                if flusso is None:
+                    uscita = pyaudio.PyAudio()
+                    flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+                ritardo_ms = 1000 * flusso.get_output_latency()
+                HUD.imposta_voce(inviluppo(suono.samples, 24000), time.time() * 1000 + ritardo_ms, 50)
+                flusso.write(suono.samples.tobytes())
+        except Exception as e:   # un guasto dell'audio non deve bloccare J.A.R.V.I.S.
+            print(f"[Riproduzione interrotta: {type(e).__name__}: {e}]")
+            while self._audio.get() is not None:   # svuota, cosi' il thread di sintesi non resta appeso
+                pass
+        finally:
+            if flusso is not None:
+                flusso.stop_stream()
+                flusso.close()
+            if uscita is not None:
+                uscita.terminate()
+
+
 # ==========================================================================
 # ASCOLTO
 # ==========================================================================
@@ -871,6 +1000,7 @@ class Orecchie:
             except sr.WaitTimeoutError:
                 return ""
         fine_parlato = time.monotonic()
+        TEMPI["_fine_parlato"] = fine_parlato
         try:
             risultato = self.recognizer.recognize_google(audio, language=STT_LANG, show_all=True)
             TEMPI["trascrizione"] = time.monotonic() - fine_parlato
@@ -1230,7 +1360,65 @@ def tool_prepara_mail(oggetto: str, testo: str, destinatari: str = "") -> str:
             "premere Invia lui stesso.")
 
 
+# Schermo (idea presa da Julian-Ivanov/jarvis-voice-assistant): uno screenshot che
+# Claude descrive. Lo screenshot va ad Anthropic, quindi lo strumento si usa solo se
+# l'utente lo chiede; dopo, la barriera di contaminazione blocca le azioni del turno.
+LATO_MASSIMO_SCREENSHOT = 1568   # oltre, l'API riduce comunque l'immagine
+
+
+def cattura_schermo() -> bytes:
+    """Schermo principale in JPEG, ridotto. Serve Pillow (pip install pillow)."""
+    from PIL import Image
+    if IS_WIN:
+        from PIL import ImageGrab
+        immagine = ImageGrab.grab()
+    elif IS_MAC:
+        import tempfile
+        with tempfile.TemporaryDirectory() as cartella:
+            file = Path(cartella) / "schermo.png"
+            # serve il permesso "Registrazione schermo" per il Terminale
+            subprocess.run(["screencapture", "-x", str(file)], check=True, timeout=15)
+            immagine = Image.open(file)
+            immagine.load()
+    else:
+        raise OSError("sistema non supportato")
+    immagine = immagine.convert("RGB")
+    immagine.thumbnail((LATO_MASSIMO_SCREENSHOT, LATO_MASSIMO_SCREENSHOT))
+    import io
+    buffer = io.BytesIO()
+    immagine.save(buffer, format="JPEG", quality=70)
+    return buffer.getvalue()
+
+
+def tool_guarda_schermo() -> list | str:
+    import base64
+    try:
+        jpeg = cattura_schermo()
+    except ImportError:
+        return "Manca Pillow: l'utente deve eseguire  py -3.13 -m pip install pillow"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"Impossibile catturare lo schermo: {e}"
+    return [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                     "data": base64.b64encode(jpeg).decode("ascii")}},
+        {"type": "text", "text": "Screenshot dello schermo principale in questo momento."},
+    ]
+
+
+def tool_apri_sito(indirizzo: str) -> str:
+    """Apre un sito nel browser dell'utente. Solo http/https: niente file locali o altri schemi."""
+    from urllib.parse import urlparse
+    indirizzo = (indirizzo or "").strip()
+    parti = urlparse(indirizzo)
+    if parti.scheme not in ("http", "https") or not parti.netloc or len(indirizzo) > 500:
+        return f"Indirizzo non valido o non consentito: '{indirizzo[:100]}'. Servono http:// o https://."
+    webbrowser.open(indirizzo)
+    return f"Aperto nel browser: {parti.netloc}"
+
+
 ESECUTORI = {
+    "guarda_schermo": tool_guarda_schermo,
+    "apri_sito": tool_apri_sito,
     "prepara_mail": tool_prepara_mail,
     "apri_app": tool_apri_app,
     "chiudi_app": tool_chiudi_app,
@@ -1244,6 +1432,27 @@ _NOMI_APP = sorted(APP_CONSENTITE.keys())
 _ESTENSIONI = ", ".join(sorted(ESTENSIONI_CONSENTITE))
 
 TOOLS_LOCALI = [
+    {
+        "name": "guarda_schermo",
+        "description": (
+            "Fa uno screenshot dello schermo principale e te lo mostra. Usalo SOLO quando "
+            "l'utente chiede esplicitamente di guardare lo schermo (es. 'cosa c'e' sul mio "
+            "schermo?', 'leggimi questo errore'). Descrivi in breve cio' che conta."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "apri_sito",
+        "description": (
+            "Apre una pagina web nel browser dell'utente, perche' la veda lui. Solo indirizzi "
+            "http o https. Per leggere tu il contenuto di una pagina usa web_fetch."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"indirizzo": {"type": "string", "description": "URL completo, es. https://..."}},
+            "required": ["indirizzo"],
+        },
+    },
     {
         "name": "prepara_mail",
         "description": (
@@ -1331,7 +1540,12 @@ TOOLS_LOCALI = [
 ]
 
 TOOL_WEB = {"type": "web_search_20250305", "name": "web_search", "max_uses": MAX_RICERCHE_WEB}
-TUTTI_I_TOOLS = TOOLS_LOCALI + [TOOL_WEB]
+# Lettura di una pagina, lato server Anthropic: niente sessioni o cookie dell'utente e
+# solo indirizzi gia' comparsi nella conversazione. Gratis a parte i token letti, che
+# max_content_tokens tiene sotto ~1 centesimo a pagina.
+TOOL_WEB_FETCH = {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2,
+                  "max_content_tokens": 8000}
+TUTTI_I_TOOLS = TOOLS_LOCALI + [TOOL_WEB, TOOL_WEB_FETCH]
 
 
 def esegui_tool(nome: str, argomenti: dict) -> str:
@@ -1339,7 +1553,8 @@ def esegui_tool(nome: str, argomenti: dict) -> str:
     if funzione is None:
         return f"Strumento sconosciuto: {nome}"
     try:
-        return str(funzione(**(argomenti or {})))
+        esito = funzione(**(argomenti or {}))
+        return esito if isinstance(esito, list) else str(esito)   # lista = testo + immagini
     except TypeError as e:
         return f"Parametri non validi per {nome}: {e}"
     except subprocess.TimeoutExpired:
@@ -1791,40 +2006,88 @@ def _messaggi(scambi: list[list[dict]]) -> list[dict]:
     return [m for scambio in scambi for m in scambio]
 
 
+def _senza_immagini(scambio: list[dict]) -> list[dict]:
+    """Gli screenshot non restano in memoria: costerebbero ~1.500 token a ogni domanda
+    successiva e resterebbero in giro dati dello schermo."""
+    def pulisci_blocco(blocco):
+        if isinstance(blocco, dict) and isinstance(blocco.get("content"), list):
+            return {**blocco, "content": [
+                {"type": "text", "text": "[screenshot non piu' disponibile]"}
+                if isinstance(parte, dict) and parte.get("type") == "image" else parte
+                for parte in blocco["content"]
+            ]}
+        return blocco
+
+    # copie, non modifiche sul posto: gli oggetti originali possono essere ancora in uso
+    return [
+        {**messaggio, "content": [pulisci_blocco(b) for b in messaggio["content"]]}
+        if isinstance(messaggio.get("content"), list) else messaggio
+        for messaggio in scambio
+    ]
+
+
 def _archivia(scambi: list[list[dict]], scambio: list[dict]) -> None:
-    scambi.append(scambio)
+    scambi.append(_senza_immagini(scambio))
     del scambi[:-MAX_SCAMBI]
 
 
-def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
-    """Un turno completo: puo' includere piu' giri di tool use."""
+# Barriera di contaminazione (idea presa da ethanplusai/jarvis): se in un turno sono
+# entrati contenuti esterni (web, file, schermo), per il resto di quel turno gli
+# strumenti che agiscono verso l'esterno vengono rifiutati. Un testo ostile letto su
+# una pagina non puo' cosi' preparare una mail o un lavoro di Claude Code da solo:
+# serve un nuovo comando dell'utente.
+STRUMENTI_CHE_AGISCONO = {"prepara_mail", "claude_code", "apri_sito"}
+STRUMENTI_CHE_LEGGONO = {"leggi_file", "guarda_schermo"}
+RISULTATI_ESTERNI = {"web_search_tool_result", "web_fetch_tool_result"}
+MESSAGGIO_CONTAMINAZIONE = (
+    "Rifiutato per sicurezza: in questo turno sono entrati contenuti esterni (web, file o "
+    "schermo) e le azioni verso l'esterno sono bloccate fino al prossimo comando. Di' "
+    "all'utente cosa hai trovato e chiedigli di ripetere la richiesta se vuole procedere."
+)
+
+
+def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str, voce=None) -> str:
+    """
+    Un turno completo: puo' includere piu' giri di tool use.
+    voce: se c'e' (ParlatoInFlusso), la risposta viene letta mentre arriva.
+    """
     scambio: list[dict] = [{"role": "user", "content": domanda}]
     HUD.imposta("elaborazione")
     in_pausa = False
+    contaminato = False
+
+    def errore(messaggio: str) -> str:
+        if voce is not None:
+            voce.aggiungi("\n" + messaggio + " ")
+        return messaggio
 
     for _ in range(MAX_GIRI_TOOL):
         partenza = time.monotonic()
+        parametri = dict(model=MODEL, max_tokens=MAX_TOKENS, system=SYSTEM_PROMPT,
+                         tools=TUTTI_I_TOOLS, messages=_messaggi(scambi) + scambio)
         try:
-            risposta = client.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                tools=TUTTI_I_TOOLS,
-                messages=_messaggi(scambi) + scambio,
-            )
+            if voce is None:
+                risposta = client.messages.create(**parametri)
+            else:
+                # Le frasi escono man mano che Claude le scrive: la voce parte prima
+                # che la risposta sia finita (idea presa da ethanplusai/jarvis).
+                with client.messages.stream(**parametri) as flusso:
+                    for testo_parziale in flusso.text_stream:
+                        voce.aggiungi(testo_parziale)
+                    risposta = flusso.get_final_message()
             TEMPI["claude"] = TEMPI.get("claude", 0.0) + time.monotonic() - partenza
             TEMPI["chiamate"] = TEMPI.get("chiamate", 0) + 1
         except anthropic.AuthenticationError:
-            return "La chiave API non e' valida. Verifichi ANTHROPIC_API_KEY."
+            return errore("La chiave API non e' valida. Verifichi ANTHROPIC_API_KEY.")
         except anthropic.NotFoundError:
-            return f"Il modello {MODEL} non risulta disponibile per questo account."
+            return errore(f"Il modello {MODEL} non risulta disponibile per questo account.")
         except anthropic.RateLimitError:
-            return "Ho superato il limite di richieste. Attenda qualche secondo."
+            return errore("Ho superato il limite di richieste. Attenda qualche secondo.")
         except anthropic.APIConnectionError:
-            return "Non riesco a raggiungere i server. Controlli la connessione."
+            return errore("Non riesco a raggiungere i server. Controlli la connessione.")
         except anthropic.APIStatusError as e:
             print(f"[Errore API {e.status_code}]: {e.message}")
-            return "Ho riscontrato un errore tecnico. I dettagli sono a schermo."
+            return errore("Ho riscontrato un errore tecnico. I dettagli sono a schermo.")
 
         CONSUMI.registra(risposta.usage)
         uso = getattr(risposta.usage, "server_tool_use", None)
@@ -1832,6 +2095,8 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
             print(f"[Ricerche web effettuate: {uso.web_search_requests}]")
 
         contenuto = list(risposta.content)
+        if any(getattr(b, "type", "") in RISULTATI_ESTERNI for b in contenuto):
+            contaminato = True
         if in_pausa:
             # Il server riprende da dove si era fermato: e' lo stesso messaggio dell'assistente.
             scambio[-1]["content"] = list(scambio[-1]["content"]) + contenuto
@@ -1863,8 +2128,13 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
                 continue
             print(f"[Strumento] {blocco.name} {json.dumps(blocco.input, ensure_ascii=False)}")
             HUD.imposta("elaborazione", blocco.name.replace("_", " "))
-            esito = esegui_tool(blocco.name, blocco.input)
-            print(f"[Esito] {esito[:200]}")
+            if contaminato and blocco.name in STRUMENTI_CHE_AGISCONO:
+                esito = MESSAGGIO_CONTAMINAZIONE
+            else:
+                esito = esegui_tool(blocco.name, blocco.input)
+            if blocco.name in STRUMENTI_CHE_LEGGONO:
+                contaminato = True
+            print(f"[Esito] {esito[:200] if isinstance(esito, str) else '[immagine dello schermo]'}")
             risultati.append(
                 {"type": "tool_result", "tool_use_id": blocco.id, "content": esito}
             )
@@ -2095,7 +2365,7 @@ def main() -> None:
             else:
                 LAVORO.annulla()   # qualunque altra frase lascia cadere il lavoro in sospeso
                 if not comando_locale(frase, scambi):
-                    parla(chiedi_a_claude(client, scambi, frase))
+                    rispondi(client, scambi, frase)
                     print(riepilogo_tempi())
             attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
@@ -2106,6 +2376,20 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\n[Interruzione manuale]")
             return
+
+
+def rispondi(client, scambi: list, frase: str) -> None:
+    """Chiede a Claude e legge la risposta: in flusso con la voce neurale, tutta insieme altrimenti."""
+    if not _neurale_attiva:
+        parla(chiedi_a_claude(client, scambi, frase))
+        return
+    voce = ParlatoInFlusso()
+    testo = chiedi_a_claude(client, scambi, frase, voce)
+    if voce.chiudi():
+        print(f"\nJ.A.R.V.I.S.: {testo}")
+        HUD.aggiungi("jarvis", testo)
+    else:
+        parla(testo)   # niente di detto in flusso (es. risposta vuota): la si legge ora
 
 
 def risposta_a_conferma(frase: str, attenzione: "Attenzione", ora: float) -> bool:

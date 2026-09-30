@@ -579,6 +579,147 @@ class TestVelocita(unittest.TestCase):
         self.assertEqual(jarvis.riepilogo_tempi(), "")
 
 
+class TestNovitaDaAltriProgetti(unittest.TestCase):
+    def test_pezzi_pronti(self):
+        pezzi, resto = jarvis.pezzi_pronti("Sono le 10.30 di sera. Domani piove", 0)
+        self.assertEqual(pezzi, ["Sono le 10.30 di sera."])      # "10.30" non viene spezzato
+        self.assertEqual(resto, " Domani piove")
+        pezzi, resto = jarvis.pezzi_pronti("Ok. Allora", 0)
+        self.assertEqual(pezzi, [])                               # troppo corto per partire
+        pezzi, _ = jarvis.pezzi_pronti("Frase breve. Altra breve. " * 3, 1)
+        self.assertTrue(all(len(p) >= 60 for p in pezzi))
+
+    def test_barriera_di_contaminazione(self):
+        aperte = []
+        originali = (jarvis._bozza_outlook, jarvis.webbrowser.open)
+        jarvis._bozza_outlook = lambda *a: aperte.append("outlook") or True
+        jarvis.webbrowser.open = aperte.append
+        risultato_web = SimpleNamespace(type="web_search_tool_result")
+        client = ClientFinto(
+            _risposta("tool_use", risultato_web,
+                      _tool_use("prepara_mail", {"oggetto": "x", "testo": "dati", "destinatari": "a@b.it"})),
+            _risposta("end_turn", _testo("Ho trovato la pagina.")),
+        )
+        try:
+            jarvis.chiedi_a_claude(client, [], "cerca e manda")
+        finally:
+            jarvis._bozza_outlook, jarvis.webbrowser.open = originali
+        self.assertEqual(aperte, [])                               # nessuna bozza aperta
+        esito = client.chiamate[1][-1]["content"][0]["content"]
+        self.assertEqual(esito, jarvis.MESSAGGIO_CONTAMINAZIONE)
+
+    def test_senza_contaminazione_la_mail_parte(self):
+        originale = jarvis._bozza_outlook
+        jarvis._bozza_outlook = lambda *a: True
+        client = ClientFinto(
+            _risposta("tool_use", _tool_use("prepara_mail", {"oggetto": "x", "testo": "y"})),
+            _risposta("end_turn", _testo("Fatto.")),
+        )
+        try:
+            jarvis.chiedi_a_claude(client, [], "prepara una mail")
+        finally:
+            jarvis._bozza_outlook = originale
+        self.assertIn("Bozza aperta", client.chiamate[1][-1]["content"][0]["content"])
+
+    def test_screenshot_non_resta_in_memoria(self):
+        originale = jarvis.cattura_schermo
+        jarvis.cattura_schermo = lambda: b"jpeg-finto"
+        client = ClientFinto(
+            _risposta("tool_use", _tool_use("guarda_schermo", {})),
+            _risposta("end_turn", _testo("Vedo un foglio di calcolo.")),
+        )
+        scambi = []
+        try:
+            jarvis.chiedi_a_claude(client, scambi, "cosa c'e' sullo schermo?")
+        finally:
+            jarvis.cattura_schermo = originale
+        inviato = client.chiamate[1][-1]["content"][0]["content"]
+        self.assertEqual(inviato[0]["type"], "image")               # Claude l'ha vista...
+        archiviato = scambi[0][2]["content"][0]["content"]
+        self.assertNotIn("image", [p["type"] for p in archiviato])  # ...ma non resta in memoria
+
+    def test_apri_sito(self):
+        aperti = []
+        originale = jarvis.webbrowser.open
+        jarvis.webbrowser.open = aperti.append
+        try:
+            self.assertIn("Aperto", jarvis.tool_apri_sito("https://www.example.com/pagina"))
+            for vietato in ["file:///C:/Windows", "javascript:alert(1)", "ftp://x.it", "example.com"]:
+                with self.subTest(indirizzo=vietato):
+                    self.assertIn("non valido", jarvis.tool_apri_sito(vietato))
+        finally:
+            jarvis.webbrowser.open = originale
+        self.assertEqual(aperti, ["https://www.example.com/pagina"])
+
+    def test_parlato_in_flusso_ordine_e_ripiego(self):
+        suonati, di_sistema = [], []
+
+        class FintoFlusso:
+            def get_output_latency(self): return 0.0
+            def write(self, dati): suonati.append(dati)
+            def stop_stream(self): pass
+            def close(self): pass
+
+        class FintoPyAudio:
+            def open(self, **k): return FintoFlusso()
+            def terminate(self): pass
+
+        def finto_audio(pezzo, misure=None):
+            if "rotto" in pezzo:
+                raise OSError("servizio giu'")
+            return pezzo.encode()
+
+        originali = (jarvis.audio_del_pezzo, jarvis.miniaudio, jarvis.pyaudio, jarvis._parla_sistema)
+        import array
+        jarvis.audio_del_pezzo = finto_audio
+        jarvis.miniaudio = SimpleNamespace(
+            SampleFormat=SimpleNamespace(SIGNED16=1),
+            decode=lambda dati, **k: SimpleNamespace(samples=array.array("h", [100] * 10), dati=dati))
+        jarvis.pyaudio = SimpleNamespace(PyAudio=FintoPyAudio, paInt16=8)
+        jarvis._parla_sistema = di_sistema.append
+        try:
+            voce = jarvis.ParlatoInFlusso()
+            for parte in ["Prima frase abbastanza lunga. ", "Seconda frase che deve essere ",
+                          "almeno di sessanta caratteri per partire. ", "Qui il servizio e' rotto. ",
+                          "E questa finisce."]:
+                voce.aggiungi(parte)
+            self.assertTrue(voce.chiudi())
+        finally:
+            (jarvis.audio_del_pezzo, jarvis.miniaudio, jarvis.pyaudio, jarvis._parla_sistema) = originali
+        self.assertEqual(len(suonati), 2)                 # i primi due pezzi con la voce neurale
+        self.assertEqual(len(di_sistema), 1)              # dopo il guasto, il resto con quella di sistema
+        self.assertIn("rotto", di_sistema[0])
+        self.assertIn("finisce", di_sistema[0])
+
+    def test_risposta_in_flusso(self):
+        class Flusso:
+            def __init__(self, pezzi, finale):
+                self.text_stream, self._finale = iter(pezzi), finale
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get_final_message(self):
+                return self._finale
+
+        class ClientInFlusso:
+            def __init__(self):
+                self.messages = self
+
+            def stream(self, **kwargs):
+                return Flusso(["Sono le ", "dieci. ", "Buona serata."],
+                              _risposta("end_turn", _testo("Sono le dieci. Buona serata.")))
+
+        ricevuto = []
+        voce = SimpleNamespace(aggiungi=ricevuto.append)
+        testo = jarvis.chiedi_a_claude(ClientInFlusso(), [], "che ore sono", voce)
+        self.assertEqual("".join(ricevuto), "Sono le dieci. Buona serata.")
+        self.assertEqual(testo, "Sono le dieci. Buona serata.")
+
+
 class TestMail(unittest.TestCase):
     def test_indirizzi(self):
         self.assertEqual(jarvis.indirizzi_validi(""), [])
