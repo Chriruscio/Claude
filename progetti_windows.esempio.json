@@ -1,4 +1,6 @@
 {
-  "sito": "C:\\Users\\cruscio\\Progetti\\sito",
-  "appunti": "C:\\Users\\cruscio\\Documents\\appunti"
+  "prova": "C:\\Users\\cruscio\\Progetti\\prova",
+  "documenti": { "percorso": "C:\\Users\\cruscio\\Documents", "sola_lettura": true },
+  "desktop": { "percorso": "C:\\Users\\cruscio\\Desktop", "sola_lettura": true },
+  "download": { "percorso": "C:\\Users\\cruscio\\Downloads", "sola_lettura": true }
 }

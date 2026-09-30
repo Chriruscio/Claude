@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import queue
 import threading
 import time
 import webbrowser
@@ -120,6 +121,7 @@ HUD_ATTIVO = os.environ.get("JARVIS_HUD", "1") != "0"
 HUD_PORTA = int(os.environ.get("JARVIS_HUD_PORTA", "8765"))
 FILE_HUD = Path(__file__).resolve().parent / "hud.html"
 PHRASE_TIME_LIMIT = 15
+PAUSA_FINE_FRASE = float(os.environ.get("JARVIS_PAUSA", "0.6"))   # era 0,8
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
 WORKSPACE = Path(
@@ -361,6 +363,21 @@ class Hud:
 
 
 HUD = Hud()
+
+# Cronometro di un turno (secondi): per vedere dove si perde tempo prima di ottimizzare.
+TEMPI: dict = {}
+
+
+def riepilogo_tempi() -> str:
+    pezzi = []
+    if "trascrizione" in TEMPI:
+        pezzi.append(f"trascrizione {TEMPI['trascrizione']:.1f} s")
+    if "claude" in TEMPI:
+        chiamate = TEMPI.get("chiamate", 1)
+        pezzi.append(f"Claude {TEMPI['claude']:.1f} s" + (f" ({chiamate} chiamate)" if chiamate > 1 else ""))
+    if "voce" in TEMPI:
+        pezzi.append(f"voce pronta in {TEMPI['voce']:.1f} s")
+    return "[Tempi: " + " · ".join(pezzi) + "]" if pezzi else ""
 URL_HUD: str | None = None
 
 
@@ -616,22 +633,79 @@ def inviluppo(campioni, frequenza: int, passo_ms: int = 50) -> list[float]:
     return [round(min(1.0, l / (0.7 * picco)), 3) for l in livelli]
 
 
+def dividi_frasi(testo: str) -> list[str]:
+    """
+    Pezzi da sintetizzare uno alla volta, cosi' la voce parte prima: il primo corto
+    (parte subito), i successivi di almeno ~120 caratteri (meno stacchi tra le frasi).
+    """
+    frasi = [f for f in re.split(r"(?<=[.!?;:])\s+", (testo or "").strip()) if f]
+    pezzi, corrente = [], ""
+    for frase in frasi:
+        corrente = f"{corrente} {frase}".strip()
+        if len(corrente) >= (30 if not pezzi else 120):
+            pezzi.append(corrente)
+            corrente = ""
+    if corrente:
+        if pezzi and len(corrente) < 30:
+            pezzi[-1] += " " + corrente
+        else:
+            pezzi.append(corrente)
+    return pezzi or ([testo.strip()] if testo and testo.strip() else [])
+
+
 def _parla_neurale(testo: str) -> None:
-    mp3 = asyncio.run(asyncio.wait_for(_sintetizza(testo), timeout=15))
-    if not mp3:
-        raise RuntimeError("nessun audio ricevuto")
-    suono = miniaudio.decode(
-        mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=24000
-    )
+    """
+    Mentre un pezzo suona, il successivo si sta gia' sintetizzando in un altro thread.
+    Se il primo pezzo fallisce si solleva l'errore (parla() passa alla voce di sistema);
+    se fallisce dopo, il resto lo legge la voce di sistema.
+    """
+    pezzi = dividi_frasi(testo)
+    coda: queue.Queue = queue.Queue(maxsize=2)
+    inizio = time.monotonic()
+
+    def sintetizza_in_ordine() -> None:
+        for i, pezzo in enumerate(pezzi):
+            try:
+                mp3 = asyncio.run(asyncio.wait_for(_sintetizza(pezzo), timeout=15))
+                if not mp3:
+                    raise RuntimeError("nessun audio ricevuto")
+            except Exception as e:
+                coda.put((i, None, e))
+                return
+            coda.put((i, mp3, None))
+        coda.put((len(pezzi), None, None))
+
+    threading.Thread(target=sintetizza_in_ordine, daemon=True).start()
     uscita = pyaudio.PyAudio()
+    flusso = None
     try:
-        flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
-        ritardo_ms = 1000 * flusso.get_output_latency()
-        HUD.imposta_voce(inviluppo(suono.samples, 24000), time.time() * 1000 + ritardo_ms, 50)
-        flusso.write(suono.samples.tobytes())
-        flusso.stop_stream()
-        flusso.close()
+        while True:
+            try:
+                i, mp3, errore = coda.get(timeout=30)
+            except queue.Empty:
+                errore, i, mp3 = TimeoutError("sintesi troppo lenta"), -1, None
+            if errore is not None:
+                if flusso is None:
+                    raise errore
+                print(f"[Voce neurale interrotta ({errore}): continuo con la voce di sistema]")
+                if i >= 0:
+                    _parla_sistema(" ".join(pezzi[i:]))
+                return
+            if mp3 is None:
+                return
+            suono = miniaudio.decode(
+                mp3, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=24000
+            )
+            if flusso is None:
+                flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+                TEMPI["voce"] = time.monotonic() - inizio
+            ritardo_ms = 1000 * flusso.get_output_latency()
+            HUD.imposta_voce(inviluppo(suono.samples, 24000), time.time() * 1000 + ritardo_ms, 50)
+            flusso.write(suono.samples.tobytes())
     finally:
+        if flusso is not None:
+            flusso.stop_stream()
+            flusso.close()
         uscita.terminate()
 
 
@@ -688,7 +762,9 @@ class Orecchie:
     def __init__(self) -> None:
         self.recognizer = sr.Recognizer()
         self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 0.8
+        # Silenzio che chiude la frase: meno attesa prima di rispondere, ma sotto ~0,5 s
+        # rischia di tagliare chi fa una pausa a meta' frase.
+        self.recognizer.pause_threshold = PAUSA_FINE_FRASE
         try:
             self.mic = sr.Microphone()
         except (OSError, AttributeError) as e:
@@ -723,8 +799,10 @@ class Orecchie:
                 )
             except sr.WaitTimeoutError:
                 return ""
+        fine_parlato = time.monotonic()
         try:
             risultato = self.recognizer.recognize_google(audio, language=STT_LANG, show_all=True)
+            TEMPI["trascrizione"] = time.monotonic() - fine_parlato
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
@@ -1028,7 +1106,61 @@ def tool_stato_sistema(cosa: str = "tutto") -> str:
     return "\n".join(pezzi) or "Nessun dato richiesto."
 
 
+# Mail: Jarvis prepara SOLO la bozza e la apre; la rilegge e la invia l'utente.
+# Nessuno strumento puo' spedire: un testo ostile letto sul web non puo' far
+# partire una mail, al massimo comporne una che l'utente vede prima di inviarla.
+_INDIRIZZO = re.compile(r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
+MAX_TESTO_MAILTO = 1500   # i collegamenti mailto oltre ~2000 caratteri vengono troncati da Windows
+
+
+def indirizzi_validi(destinatari: str) -> list[str] | None:
+    """Lista di indirizzi separati da virgola o punto e virgola; None se uno non e' valido."""
+    parti = [p.strip() for p in re.split(r"[,;]", destinatari or "") if p.strip()]
+    return parti if all(_INDIRIZZO.match(p) for p in parti) else None
+
+
+def link_mailto(destinatari: list[str], oggetto: str, testo: str) -> str:
+    from urllib.parse import quote
+    return ("mailto:" + quote(",".join(destinatari), safe="@,")
+            + "?subject=" + quote(oggetto, safe="") + "&body=" + quote(testo, safe=""))
+
+
+def _bozza_outlook(destinatari: list[str], oggetto: str, testo: str) -> bool:
+    """Outlook classico via COM: bozza aperta a schermo, mai .Send(). False se non disponibile."""
+    if not IS_WIN:
+        return False
+    try:
+        import win32com.client
+        mail = win32com.client.Dispatch("Outlook.Application").CreateItem(0)   # 0 = messaggio
+        mail.To = "; ".join(destinatari)
+        mail.Subject = oggetto
+        mail.Body = testo
+        mail.Display(False)
+        return True
+    except Exception as e:   # pywin32 assente, nuovo Outlook senza COM, Outlook chiuso male...
+        print(f"[Bozza via Outlook non riuscita ({type(e).__name__}): uso il programma di posta predefinito]")
+        return False
+
+
+def tool_prepara_mail(oggetto: str, testo: str, destinatari: str = "") -> str:
+    lista = indirizzi_validi(destinatari)
+    if lista is None:
+        return f"Indirizzo non valido: '{destinatari}'. Chiedi all'utente l'indirizzo corretto."
+    oggetto, testo = (oggetto or "").strip()[:200], (testo or "").strip()
+    if not testo:
+        return "Serve il testo della mail."
+    if _bozza_outlook(lista, oggetto, testo):
+        dove = "in Outlook"
+    else:
+        troncato = len(testo) > MAX_TESTO_MAILTO
+        webbrowser.open(link_mailto(lista, oggetto, testo[:MAX_TESTO_MAILTO]))
+        dove = "nel programma di posta predefinito" + (" (testo accorciato: era troppo lungo)" if troncato else "")
+    return (f"Bozza aperta {dove}. NON e' stata inviata: di' all'utente di rileggerla e di "
+            "premere Invia lui stesso.")
+
+
 ESECUTORI = {
+    "prepara_mail": tool_prepara_mail,
     "apri_app": tool_apri_app,
     "chiudi_app": tool_chiudi_app,
     "scrivi_file": tool_scrivi_file,
@@ -1041,6 +1173,23 @@ _NOMI_APP = sorted(APP_CONSENTITE.keys())
 _ESTENSIONI = ", ".join(sorted(ESTENSIONI_CONSENTITE))
 
 TOOLS_LOCALI = [
+    {
+        "name": "prepara_mail",
+        "description": (
+            "Prepara una bozza di email e la apre sullo schermo (in Outlook se possibile). "
+            "NON invia: l'utente la rilegge e preme Invia. Scrivi il testo completo, in italiano, "
+            "salvo diversa richiesta. Se l'utente non dice l'indirizzo lascia vuoti i destinatari."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "destinatari": {"type": "string", "description": "Indirizzi separati da virgola, o vuoto."},
+                "oggetto": {"type": "string"},
+                "testo": {"type": "string"},
+            },
+            "required": ["oggetto", "testo"],
+        },
+    },
     {
         "name": "apri_app",
         "description": f"Apre un'applicazione sul {NOME_MACCHINA}. Solo le app in whitelist.",
@@ -1152,14 +1301,30 @@ SCADENZA_CONFERMA = 60                 # secondi per dire "conferma"
 BUDGET_LAVORO_USD = "5"                # tetto di spesa stimata per lavoro
 COMANDI_CONFERMA = {"conferma", "confermo", "si conferma", "sì conferma", "procedi"}
 COMANDI_ANNULLA = {"annulla", "no", "lascia stare", "lascia perdere"}
+COMANDI_RIPRISTINO = {
+    "annulla l ultimo lavoro", "annulla ultimo lavoro", "ripristina l ultimo lavoro",
+    "ripristina il progetto", "torna indietro",
+}
 ISTRUZIONE_CLAUDE_CODE = (
     "Svolgi il compito descritto nel testo ricevuto in ingresso, lavorando solo nella "
     "cartella corrente. Alla fine riassumi in italiano, in due o tre frasi semplici adatte "
     "a essere lette ad alta voce, cosa hai cambiato e in quali file."
 )
+ISTRUZIONE_LETTURA = (
+    "Rispondi alla richiesta descritta nel testo ricevuto in ingresso leggendo e cercando i "
+    "file della cartella corrente, senza modificare nulla. Rispondi in italiano, in poche "
+    "frasi semplici adatte a essere lette ad alta voce, citando i nomi dei file utili."
+)
+
+# Copia di sicurezza prima di ogni lavoro che modifica: "Jarvis, annulla l'ultimo lavoro".
+CARTELLA_BACKUP = CARTELLA_JARVIS / "backup"
+FILE_ULTIMO_LAVORO = CARTELLA_BACKUP / "ultimo_lavoro.json"
+MAX_BYTE_BACKUP = 500 * 1024 ** 2      # oltre, niente lavori di modifica: il progetto va gestito con git
+BACKUP_DA_TENERE = 5                   # per progetto
 
 ESEGUIBILE_CLAUDE: str | None = None
-PROGETTI: dict[str, Path] = {}
+# nome -> {"percorso": Path, "sola_lettura": bool}
+PROGETTI: dict[str, dict] = {}
 
 
 def _cartelle_protette() -> list[Path]:
@@ -1181,7 +1346,11 @@ def progetto_non_valido(percorso: Path) -> str | None:
     return None
 
 
-def carica_progetti(percorso: Path) -> dict[str, Path]:
+def carica_progetti(percorso: Path) -> dict[str, dict]:
+    """
+    Formato: {"nome": "C:\\\\percorso"} per un progetto modificabile,
+    {"nome": {"percorso": "C:\\\\percorso", "sola_lettura": true}} per una cartella da consultare.
+    """
     if not percorso.exists():
         return {}
     try:
@@ -1198,6 +1367,10 @@ def carica_progetti(percorso: Path) -> dict[str, Path]:
         return {}
     progetti = {}
     for nome, valore in dati.items():
+        sola_lettura = False
+        if isinstance(valore, dict):
+            sola_lettura = valore.get("sola_lettura") is True
+            valore = valore.get("percorso")
         if not isinstance(valore, str) or not valore.strip():
             print(f"[ATTENZIONE: progetto '{nome}': serve il percorso della cartella. Ignorato.]")
             continue
@@ -1205,7 +1378,10 @@ def carica_progetti(percorso: Path) -> dict[str, Path]:
         if motivo:
             print(f"[ATTENZIONE: progetto '{nome}': {motivo}. Ignorato.]")
             continue
-        progetti[nome.strip().lower()] = Path(valore.strip()).expanduser().resolve()
+        progetti[nome.strip().lower()] = {
+            "percorso": Path(valore.strip()).expanduser().resolve(),
+            "sola_lettura": sola_lettura,
+        }
     return progetti
 
 
@@ -1221,12 +1397,12 @@ def versione_claude(eseguibile: str) -> tuple[int, int, int] | None:
     return tuple(int(n) for n in trovata.groups()) if trovata else None
 
 
-def comando_claude_code(eseguibile: str) -> list[str]:
+def comando_claude_code(eseguibile: str, sola_lettura: bool = False) -> list[str]:
     """Argomenti tutti costanti: il testo del compito arriva da stdin."""
     return [
-        eseguibile, "-p", ISTRUZIONE_CLAUDE_CODE,
+        eseguibile, "-p", ISTRUZIONE_LETTURA if sola_lettura else ISTRUZIONE_CLAUDE_CODE,
         "--restricted",
-        "--tools", "Read,Edit,Write,Glob,Grep",
+        "--tools", "Read,Glob,Grep" if sola_lettura else "Read,Edit,Write,Glob,Grep",
         "--disallowedTools", "mcp__*",
         "--permission-mode", "acceptEdits",
         "--permission-prompts", "none",
@@ -1251,6 +1427,34 @@ def _prime_frasi(testo: str, massimo: int = 320) -> str:
     return taglio[:punto + 1] if punto > 80 else taglio.rstrip() + "..."
 
 
+def elenco_file(cartella: Path) -> set[str]:
+    return {p.relative_to(cartella).as_posix() for p in cartella.rglob("*") if p.is_file()}
+
+
+def dimensione_cartella(cartella: Path, limite: int) -> int:
+    """Somma le dimensioni fermandosi appena supera il limite (non serve contare tutto)."""
+    totale = 0
+    for p in cartella.rglob("*"):
+        if p.is_file():
+            totale += p.stat().st_size
+            if totale > limite:
+                break
+    return totale
+
+
+def crea_backup(progetto: str, cartella: Path) -> Path:
+    if dimensione_cartella(cartella, MAX_BYTE_BACKUP) > MAX_BYTE_BACKUP:
+        raise OSError(f"il progetto supera {MAX_BYTE_BACKUP // 1024 ** 2} MB: troppo grande per "
+                      "la copia di sicurezza automatica")
+    base = CARTELLA_BACKUP / re.sub(r"[^\w-]", "_", progetto)
+    destinazione = base / f"{datetime.now():%Y%m%d-%H%M%S}"
+    shutil.copytree(cartella, destinazione)
+    vecchi = sorted(p for p in base.iterdir() if p.is_dir())[:-BACKUP_DA_TENERE]
+    for vecchio in vecchi:
+        shutil.rmtree(vecchio, ignore_errors=True)
+    return destinazione
+
+
 class LavoroClaudeCode:
     def __init__(self, esegui=subprocess.run) -> None:
         self._lock = threading.Lock()
@@ -1259,10 +1463,47 @@ class LavoroClaudeCode:
         self.in_corso: dict | None = None
         self.avvisi: deque = deque()
 
-    def prepara(self, progetto: str, percorso: Path, compito: str, ora: float) -> None:
+    def prepara(self, progetto: str, percorso: Path, compito: str, ora: float,
+                sola_lettura: bool = False) -> None:
         with self._lock:
-            self.in_attesa = {"progetto": progetto, "percorso": percorso, "compito": compito,
+            self.in_attesa = {"tipo": "lavoro", "progetto": progetto, "percorso": percorso,
+                              "compito": compito, "sola_lettura": sola_lettura,
                               "scade": ora + SCADENZA_CONFERMA}
+
+    def prepara_ripristino(self, ora: float) -> str:
+        """Prepara l'annullamento dell'ultimo lavoro di modifica; parte solo con 'conferma'."""
+        ultimo = self.ultimo_lavoro()
+        if not ultimo:
+            return "Non ho nessun lavoro da annullare."
+        if self.occupato():
+            return "Claude Code sta lavorando: aspetti che finisca."
+        with self._lock:
+            self.in_attesa = {"tipo": "ripristino", "progetto": ultimo["progetto"],
+                              "scade": ora + SCADENZA_CONFERMA}
+        return (f"Riporto il progetto {ultimo['progetto']} com'era prima dell'ultimo lavoro. "
+                "Le modifiche fatte dopo a quei file andranno perse. Dica conferma.")
+
+    @staticmethod
+    def ultimo_lavoro() -> dict | None:
+        try:
+            dati = json.loads(FILE_ULTIMO_LAVORO.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return dati if isinstance(dati, dict) and Path(dati.get("backup", "")).is_dir() else None
+
+    def ripristina(self) -> str:
+        ultimo = self.ultimo_lavoro()
+        if not ultimo:
+            return "Non ho nessun lavoro da annullare."
+        cartella, backup = Path(ultimo["percorso"]), Path(ultimo["backup"])
+        try:
+            shutil.copytree(backup, cartella, dirs_exist_ok=True)   # rimette i file modificati o cancellati
+            for relativo in ultimo.get("nuovi", []):                 # toglie quelli creati dal lavoro
+                (cartella / relativo).unlink(missing_ok=True)
+            FILE_ULTIMO_LAVORO.unlink(missing_ok=True)
+        except OSError as e:
+            return f"Il ripristino non e' riuscito del tutto: {e}. La copia e' in {backup}."
+        return f"Fatto: il progetto {ultimo['progetto']} e' tornato com'era prima dell'ultimo lavoro."
 
     def ha_attesa(self, ora: float) -> bool:
         with self._lock:
@@ -1286,16 +1527,27 @@ class LavoroClaudeCode:
                 return "Non c'e' nessun lavoro da confermare."
             if self.in_corso:
                 return "Claude Code e' gia' al lavoro su un altro progetto."
-            lavoro["inizio"] = time.time()
-            self.in_corso = lavoro
+            if lavoro["tipo"] == "lavoro":
+                lavoro["inizio"] = time.time()
+                self.in_corso = lavoro
+        if lavoro["tipo"] == "ripristino":
+            return self.ripristina()
         threading.Thread(target=self._esegui, args=(lavoro,), daemon=True).start()
         return f"Avviato su {lavoro['progetto']}. La avviso quando ha finito."
 
     def _esegui(self, lavoro: dict) -> None:
         esito_testo, errore, costo = "", False, None
+        cartella = Path(lavoro["percorso"])
+        if not lavoro["sola_lettura"]:
+            try:
+                lavoro["backup"] = crea_backup(lavoro["progetto"], cartella)
+                lavoro["prima"] = elenco_file(cartella)
+            except OSError as e:
+                self._chiudi(lavoro, f"niente copia di sicurezza, lavoro non avviato ({e})", True, None)
+                return
         try:
             esito = self._esegui_processo(
-                comando_claude_code(ESEGUIBILE_CLAUDE or "claude"),
+                comando_claude_code(ESEGUIBILE_CLAUDE or "claude", lavoro["sola_lettura"]),
                 input=lavoro["compito"], cwd=str(lavoro["percorso"]), env=ambiente_claude_code(),
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=DURATA_MASSIMA_LAVORO, creationflags=SENZA_FINESTRA,
@@ -1313,6 +1565,18 @@ class LavoroClaudeCode:
             errore, esito_testo = True, f"superato il limite di {DURATA_MASSIMA_LAVORO // 60} minuti"
         except OSError as e:
             errore, esito_testo = True, f"impossibile avviare Claude Code ({e})"
+        if "backup" in lavoro:
+            # Anche se il lavoro e' fallito puo' aver cambiato qualcosa: si puo' sempre annullare.
+            try:
+                CARTELLA_BACKUP.mkdir(parents=True, exist_ok=True)
+                FILE_ULTIMO_LAVORO.write_text(json.dumps({
+                    "progetto": lavoro["progetto"],
+                    "percorso": str(cartella),
+                    "backup": str(lavoro["backup"]),
+                    "nuovi": sorted(elenco_file(cartella) - lavoro["prima"]),
+                }), encoding="utf-8")
+            except OSError as e:
+                print(f"[Dati per l'annullamento non salvati: {e}]")
         self._chiudi(lavoro, esito_testo, errore, costo)
 
     def _chiudi(self, lavoro: dict, esito_testo: str, errore: bool, costo) -> None:
@@ -1329,12 +1593,16 @@ class LavoroClaudeCode:
             )
         except OSError as e:
             print(f"[Report di Claude Code non salvato: {e}]")
+        # L'esito si legge a voce ma NON entra nella memoria del modello: quello che Claude Code
+        # ha letto nei file non puo' finire in una ricerca web o in una mail.
         if errore:
             avviso = (f"Claude Code non e' riuscito a completare il lavoro su {lavoro['progetto']}: "
                       f"{_prime_frasi(esito_testo, 200) or 'motivo sconosciuto'}")
+        elif lavoro["sola_lettura"]:
+            avviso = f"Da {lavoro['progetto']}: {_prime_frasi(esito_testo, 700)}"
         else:
             avviso = (f"Claude Code ha finito il lavoro su {lavoro['progetto']}. "
-                      f"{_prime_frasi(esito_testo)}")
+                      f"{_prime_frasi(esito_testo)} Se non va bene, dica: annulla l'ultimo lavoro.")
         with self._lock:
             self.in_corso = None
             self.avvisi.append(avviso)
@@ -1349,7 +1617,8 @@ class LavoroClaudeCode:
                 return {"fase": "lavoro", "progetto": self.in_corso["progetto"],
                         "secondi": round(time.time() - self.in_corso["inizio"])}
             if self.in_attesa:
-                return {"fase": "conferma", "progetto": self.in_attesa["progetto"]}
+                return {"fase": "conferma", "progetto": self.in_attesa["progetto"],
+                        "ripristino": self.in_attesa["tipo"] == "ripristino"}
             return {"fase": "inattivo" if ESEGUIBILE_CLAUDE else "non configurato"}
 
 
@@ -1368,11 +1637,16 @@ def tool_claude_code(progetto: str, compito: str) -> str:
     occupato = LAVORO.occupato()
     if occupato:
         return f"Claude Code sta gia' lavorando su {occupato}: bisogna aspettare che finisca."
-    LAVORO.prepara(chiave, PROGETTI[chiave], compito, time.monotonic())
+    progetto_scelto = PROGETTI[chiave]
+    LAVORO.prepara(chiave, progetto_scelto["percorso"], compito, time.monotonic(),
+                   progetto_scelto["sola_lettura"])
+    tipo = ("una ricerca in SOLA LETTURA (non modifichera' nulla)" if progetto_scelto["sola_lettura"]
+            else "un lavoro di modifica (prima fara' una copia di sicurezza)")
     return (
-        "Lavoro PREPARATO ma NON avviato. Riassumi all'utente in una frase cosa fara' Claude Code "
-        f"e in quale progetto ({chiave}), poi chiedigli di dire 'conferma' entro un minuto. "
-        "Non dire che e' gia' partito: parte solo con la sua conferma a voce."
+        f"PREPARATO ma NON avviato: {tipo} in '{chiave}'. Riassumi all'utente in una frase cosa "
+        "fara' Claude Code, poi chiedigli di dire 'conferma' entro un minuto. Non dire che e' "
+        "gia' partito: parte solo con la sua conferma a voce. Il risultato lo leggera' Jarvis a "
+        "voce quando e' pronto: tu non lo vedrai, quindi non inventarlo."
     )
 
 
@@ -1398,11 +1672,12 @@ def configura_claude_code() -> None:
     TUTTI_I_TOOLS.insert(len(TOOLS_LOCALI), {
         "name": "claude_code",
         "description": (
-            "Affida a Claude Code un lavoro in uno dei progetti dell'utente: creare, leggere o "
-            "modificare file nella cartella del progetto (non puo' eseguire comandi). "
-            "E' l'UNICO modo per toccare i file di un progetto: ogni volta che l'utente nomina "
-            "un progetto usa questo strumento, mai scrivi_file. Il lavoro NON parte subito: "
-            "serve la conferma a voce dell'utente. Descrivi il compito in modo completo e preciso."
+            "Affida a Claude Code un lavoro in una delle cartelle dell'utente: nelle cartelle "
+            "modificabili puo' creare, leggere e modificare file (con copia di sicurezza "
+            "automatica), in quelle di sola lettura puo' solo cercare e leggere. Non puo' "
+            "eseguire comandi. E' l'UNICO modo per toccare quelle cartelle: ogni volta che "
+            "l'utente ne nomina una usa questo strumento. Il lavoro NON parte subito: serve la "
+            "conferma a voce dell'utente. Descrivi il compito in modo completo e preciso."
         ),
         "input_schema": {
             "type": "object",
@@ -1413,13 +1688,19 @@ def configura_claude_code() -> None:
             "required": ["progetto", "compito"],
         },
     })
-    SYSTEM_PROMPT += (
-        f"\n\nProgetti dell'utente: {', '.join(sorted(PROGETTI))}. Qualunque richiesta che "
-        "nomina un progetto va affidata allo strumento claude_code, mai a scrivi_file. "
-        "Non dire mai di aver fatto qualcosa in un progetto se claude_code non l'ha fatto: "
-        "riferisci sempre esattamente dove e' stato salvato un file."
+    elenco = ", ".join(
+        f"{nome} ({'sola lettura' if dati['sola_lettura'] else 'modificabile'})"
+        for nome, dati in sorted(PROGETTI.items())
     )
-    print(f"[Claude Code {'.'.join(map(str, versione))}: progetti {', '.join(sorted(PROGETTI))}]")
+    SYSTEM_PROMPT += (
+        f"\n\nCartelle dell'utente per Claude Code: {elenco}. Qualunque richiesta che nomina "
+        "una di queste cartelle, anche solo per cercare o leggere qualcosa, va affidata allo "
+        "strumento claude_code, mai a scrivi_file o leggi_file. Non dire mai di aver fatto "
+        "qualcosa in una cartella se claude_code non l'ha fatto: riferisci sempre esattamente "
+        "dove e' stato salvato un file. Se l'utente vuole annullare l'ultimo lavoro di Claude "
+        "Code, digli di dire esattamente: annulla l'ultimo lavoro."
+    )
+    print(f"[Claude Code {'.'.join(map(str, versione))}: {elenco}]")
 
 
 # ==========================================================================
@@ -1442,6 +1723,7 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
     in_pausa = False
 
     for _ in range(MAX_GIRI_TOOL):
+        partenza = time.monotonic()
         try:
             risposta = client.messages.create(
                 model=MODEL,
@@ -1450,6 +1732,8 @@ def chiedi_a_claude(client, scambi: list[list[dict]], domanda: str) -> str:
                 tools=TUTTI_I_TOOLS,
                 messages=_messaggi(scambi) + scambio,
             )
+            TEMPI["claude"] = TEMPI.get("claude", 0.0) + time.monotonic() - partenza
+            TEMPI["chiamate"] = TEMPI.get("chiamate", 0) + 1
         except anthropic.AuthenticationError:
             return "La chiave API non e' valida. Verifichi ANTHROPIC_API_KEY."
         except anthropic.NotFoundError:
@@ -1680,6 +1964,7 @@ def main() -> None:
                 attenzione.apri_finestra(time.monotonic())
                 continue
 
+            TEMPI.clear()
             ora = time.monotonic()
             in_finestra = attenzione.finestra_aperta(ora)
             # In finestra si aspetta solo il tempo rimasto: una frase iniziata dopo
@@ -1719,10 +2004,14 @@ def main() -> None:
             elif LAVORO.ha_attesa(time.monotonic()) and _normalizza(frase) in COMANDI_ANNULLA:
                 LAVORO.annulla()
                 parla("Annullato.")
+            elif _normalizza(frase) in COMANDI_RIPRISTINO:
+                # Anche il ripristino lo decide J.A.R.V.I.S., non il modello, e chiede conferma.
+                parla(LAVORO.prepara_ripristino(time.monotonic()))
             else:
                 LAVORO.annulla()   # qualunque altra frase lascia cadere il lavoro in sospeso
                 if not comando_locale(frase, scambi):
                     parla(chiedi_a_claude(client, scambi, frase))
+                    print(riepilogo_tempi())
             attenzione.apri_finestra(time.monotonic())
         except Spegnimento:
             parla("Disattivazione dei sistemi. A presto, Signore.")

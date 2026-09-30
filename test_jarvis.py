@@ -336,14 +336,32 @@ class TestClaudeCode(unittest.TestCase):
         self.radice = Path(self._tmp.name).resolve()
         self.progetto = self.radice / "sito"
         self.progetto.mkdir()
-        self._originali = (jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO)
+        self.documenti = self.radice / "documenti"
+        self.documenti.mkdir()
+        self._originali = (jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO,
+                           jarvis.CARTELLA_BACKUP, jarvis.FILE_ULTIMO_LAVORO)
         jarvis.CARTELLA_REPORT = self.radice / "report"
-        jarvis.PROGETTI = {"sito": self.progetto}
+        jarvis.CARTELLA_BACKUP = self.radice / "backup"
+        jarvis.FILE_ULTIMO_LAVORO = jarvis.CARTELLA_BACKUP / "ultimo_lavoro.json"
+        jarvis.PROGETTI = {
+            "sito": {"percorso": self.progetto, "sola_lettura": False},
+            "documenti": {"percorso": self.documenti, "sola_lettura": True},
+        }
         jarvis.LAVORO = jarvis.LavoroClaudeCode()
 
     def tearDown(self):
-        jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO = self._originali
+        (jarvis.CARTELLA_REPORT, jarvis.PROGETTI, jarvis.LAVORO,
+         jarvis.CARTELLA_BACKUP, jarvis.FILE_ULTIMO_LAVORO) = self._originali
         self._tmp.cleanup()
+
+    def _esegui_sincrono(self, lavoro, progetto, compito):
+        dati = jarvis.PROGETTI[progetto]
+        lavoro.prepara(progetto, dati["percorso"], compito, 0, dati["sola_lettura"])
+        dettagli = lavoro.in_attesa
+        dettagli["inizio"] = 0
+        lavoro.in_corso = dettagli
+        lavoro._esegui(dettagli)          # sincrono, senza thread
+        return lavoro.prossimo_avviso()
 
     def test_cartelle_vietate(self):
         self.assertIsNone(jarvis.progetto_non_valido(self.progetto))
@@ -359,11 +377,21 @@ class TestClaudeCode(unittest.TestCase):
         f = self.radice / "progetti.json"
         f.write_text(json.dumps({
             "Sito": str(self.progetto),
+            "Documenti": {"percorso": str(self.documenti), "sola_lettura": True},
             "jarvis": str(jarvis.CARTELLA_CODICE_JARVIS),
             "vuoto": "",
         }), encoding="utf-8")
-        self.assertEqual(jarvis.carica_progetti(f), {"sito": self.progetto})
+        self.assertEqual(jarvis.carica_progetti(f), {
+            "sito": {"percorso": self.progetto, "sola_lettura": False},
+            "documenti": {"percorso": self.documenti, "sola_lettura": True},
+        })
         self.assertEqual(jarvis.carica_progetti(self.radice / "manca.json"), {})
+
+    def test_sola_lettura_senza_strumenti_di_modifica(self):
+        argomenti = jarvis.comando_claude_code("claude", sola_lettura=True)
+        strumenti = argomenti[argomenti.index("--tools") + 1]
+        self.assertEqual(strumenti, "Read,Glob,Grep")
+        self.assertIn(jarvis.ISTRUZIONE_LETTURA, argomenti)
 
     def test_comando_senza_testo_del_modello_e_senza_chiave(self):
         argomenti = jarvis.comando_claude_code("claude")
@@ -401,41 +429,80 @@ class TestClaudeCode(unittest.TestCase):
                 {"result": "Ho aggiunto il titolo in index.html.", "is_error": False, "total_cost_usd": 0.12}))
 
         lavoro = jarvis.LavoroClaudeCode(esegui=finto_run)
-        lavoro.prepara("sito", self.progetto, "aggiungi un titolo", 0)
-        dettagli = lavoro.in_attesa
-        dettagli["inizio"] = 0
-        lavoro.in_corso = dettagli
-        lavoro._esegui(dettagli)          # sincrono, senza thread
+        avviso = self._esegui_sincrono(lavoro, "sito", "aggiungi un titolo")
         argomenti, opzioni = chiamate[0]
         self.assertEqual(opzioni["input"], "aggiungi un titolo")   # il compito passa da stdin
         self.assertNotIn("aggiungi un titolo", argomenti)
         self.assertEqual(opzioni["cwd"], str(self.progetto))
-        avviso = lavoro.prossimo_avviso()
         self.assertIn("ha finito il lavoro su sito", avviso)
         self.assertIn("index.html", avviso)
+        self.assertIn("annulla l'ultimo lavoro", avviso)
         self.assertIsNone(lavoro.occupato())
         self.assertEqual(len(list(jarvis.CARTELLA_REPORT.glob("*.md"))), 1)
+
+    def test_copia_di_sicurezza_e_ripristino(self):
+        (self.progetto / "index.html").write_text("originale", encoding="utf-8")
+        (self.progetto / "da_cancellare.txt").write_text("resto", encoding="utf-8")
+
+        def lavoro_che_modifica(argomenti, cwd, **opzioni):
+            cartella = Path(cwd)
+            (cartella / "index.html").write_text("modificato", encoding="utf-8")
+            (cartella / "da_cancellare.txt").unlink()
+            (cartella / "nuovo.txt").write_text("creato dal lavoro", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stderr="", stdout=json.dumps({"result": "fatto"}))
+
+        lavoro = jarvis.LavoroClaudeCode(esegui=lavoro_che_modifica)
+        self._esegui_sincrono(lavoro, "sito", "modifica")
+        self.assertEqual((self.progetto / "index.html").read_text(encoding="utf-8"), "modificato")
+        # un file creato dall'utente DOPO il lavoro non deve sparire col ripristino
+        (self.progetto / "mio.txt").write_text("mio", encoding="utf-8")
+
+        self.assertIn("Dica conferma", lavoro.prepara_ripristino(0))
+        self.assertTrue(lavoro.ha_attesa(0))
+        self.assertIn("tornato com'era", lavoro.avvia())
+        self.assertEqual((self.progetto / "index.html").read_text(encoding="utf-8"), "originale")
+        self.assertTrue((self.progetto / "da_cancellare.txt").exists())
+        self.assertFalse((self.progetto / "nuovo.txt").exists())
+        self.assertTrue((self.progetto / "mio.txt").exists())
+        self.assertEqual(lavoro.prepara_ripristino(0), "Non ho nessun lavoro da annullare.")
+
+    def test_sola_lettura_niente_copia_e_risposta_letta(self):
+        lavoro = jarvis.LavoroClaudeCode(esegui=lambda *a, **k: SimpleNamespace(
+            returncode=0, stderr="", stdout=json.dumps({"result": "Il contratto scade a marzo."})))
+        avviso = self._esegui_sincrono(lavoro, "documenti", "quando scade il contratto?")
+        self.assertEqual(avviso, "Da documenti: Il contratto scade a marzo.")
+        self.assertFalse(jarvis.CARTELLA_BACKUP.exists())
+        self.assertIsNone(lavoro.ultimo_lavoro())
+
+    def test_progetto_troppo_grande_non_parte(self):
+        originale = jarvis.MAX_BYTE_BACKUP
+        jarvis.MAX_BYTE_BACKUP = 3
+        (self.progetto / "grande.txt").write_text("troppi byte", encoding="utf-8")
+        chiamate = []
+        lavoro = jarvis.LavoroClaudeCode(esegui=lambda *a, **k: chiamate.append(1))
+        try:
+            avviso = self._esegui_sincrono(lavoro, "sito", "modifica")
+        finally:
+            jarvis.MAX_BYTE_BACKUP = originale
+        self.assertEqual(chiamate, [])
+        self.assertIn("niente copia di sicurezza", avviso)
 
     def test_errore_riportato(self):
         lavoro = jarvis.LavoroClaudeCode(esegui=lambda *a, **k: SimpleNamespace(
             returncode=1, stderr="", stdout=json.dumps({"result": "Not logged in", "is_error": True})))
-        lavoro.prepara("sito", self.progetto, "x", 0)
-        dettagli = lavoro.in_attesa
-        dettagli["inizio"] = 0
-        lavoro._esegui(dettagli)
-        self.assertIn("non e' riuscito", lavoro.prossimo_avviso())
+        self.assertIn("non e' riuscito", self._esegui_sincrono(lavoro, "sito", "x"))
 
     def test_configurazione_istruisce_il_modello(self):
         originali = (jarvis.SYSTEM_PROMPT, list(jarvis.TUTTI_I_TOOLS), dict(jarvis.ESECUTORI),
                      jarvis.carica_progetti, jarvis.shutil.which, jarvis.versione_claude,
                      jarvis.ESEGUIBILE_CLAUDE)
-        jarvis.carica_progetti = lambda percorso: {"sito": self.progetto}
+        jarvis.carica_progetti = lambda percorso: dict(jarvis.PROGETTI)
         jarvis.shutil.which = lambda nome: "claude"
         jarvis.versione_claude = lambda eseguibile: (2, 1, 285)
         try:
             jarvis.configura_claude_code()
             self.assertIn("claude_code", jarvis.ESECUTORI)
-            self.assertIn("Progetti dell'utente: sito", jarvis.SYSTEM_PROMPT)
+            self.assertIn("documenti (sola lettura), sito (modificabile)", jarvis.SYSTEM_PROMPT)
             self.assertIn("mai a scrivi_file", jarvis.SYSTEM_PROMPT)
         finally:
             (jarvis.SYSTEM_PROMPT, strumenti, esecutori, jarvis.carica_progetti,
@@ -453,6 +520,55 @@ class TestClaudeCode(unittest.TestCase):
         finally:
             jarvis.subprocess.run = originale
         self.assertGreaterEqual((2, 1, 284), jarvis.VERSIONE_MINIMA_CLAUDE)
+
+
+class TestVelocita(unittest.TestCase):
+    def test_dividi_frasi(self):
+        testo = ("Sono le dieci. Il sole splende su Roma e le previsioni danno bel tempo per "
+                 "tutta la settimana, salvo sorprese. Domani ventiquattro gradi. Dopodomani anche. Ok.")
+        pezzi = jarvis.dividi_frasi(testo)
+        self.assertEqual(" ".join(pezzi), testo)          # nessuna parola persa o duplicata
+        self.assertLess(len(pezzi[0]), 120)               # il primo pezzo e' corto: si parte prima
+        self.assertTrue(all(len(p) >= 30 for p in pezzi[1:]))
+        self.assertEqual(jarvis.dividi_frasi("Ciao."), ["Ciao."])
+        self.assertEqual(jarvis.dividi_frasi(""), [])
+
+    def test_riepilogo_tempi(self):
+        jarvis.TEMPI.clear()
+        jarvis.TEMPI.update({"trascrizione": 0.62, "claude": 2.4, "chiamate": 2, "voce": 0.5})
+        self.assertEqual(jarvis.riepilogo_tempi(),
+                         "[Tempi: trascrizione 0.6 s · Claude 2.4 s (2 chiamate) · voce pronta in 0.5 s]")
+        jarvis.TEMPI.clear()
+        self.assertEqual(jarvis.riepilogo_tempi(), "")
+
+
+class TestMail(unittest.TestCase):
+    def test_indirizzi(self):
+        self.assertEqual(jarvis.indirizzi_validi(""), [])
+        self.assertEqual(jarvis.indirizzi_validi("a@b.it; c@d.com"), ["a@b.it", "c@d.com"])
+        self.assertIsNone(jarvis.indirizzi_validi("mario rossi"))
+        self.assertIsNone(jarvis.indirizzi_validi("a@b.it?bcc=spia@x.com"))
+
+    def test_link_mailto_codificato(self):
+        link = jarvis.link_mailto(["a@b.it"], "Ciao & saluti", "Riga 1\nRiga 2?cc=x@y.z")
+        self.assertTrue(link.startswith("mailto:a@b.it?subject="))
+        self.assertNotIn("\n", link)
+        self.assertNotIn("&saluti", link)
+        self.assertEqual(link.count("?"), 1)          # niente parametri iniettati dal testo
+        self.assertNotIn("cc=x@y.z", link)
+
+    def test_bozza_mai_inviata(self):
+        aperti = []
+        originali = (jarvis._bozza_outlook, jarvis.webbrowser.open)
+        jarvis._bozza_outlook = lambda *a: False
+        jarvis.webbrowser.open = aperti.append
+        try:
+            esito = jarvis.tool_prepara_mail("Oggetto", "Testo", "a@b.it")
+        finally:
+            jarvis._bozza_outlook, jarvis.webbrowser.open = originali
+        self.assertEqual(len(aperti), 1)
+        self.assertIn("NON e' stata inviata", esito)
+        self.assertIn("non valido", jarvis.tool_prepara_mail("x", "y", "non un indirizzo"))
 
 
 class TestStatoSistema(unittest.TestCase):

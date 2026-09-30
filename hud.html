@@ -425,7 +425,8 @@
       const minuti = Math.floor(c.secondi / 60);
       misura("m-claude", "AL LAVORO", c.progetto + " · " + (minuti < 1 ? "meno di un minuto" : minuti + " min"));
     } else if (c.fase === "conferma") {
-      misura("m-claude", "CONFERMA?", "dica “conferma” per " + c.progetto);
+      misura("m-claude", c.ripristino ? "ANNULLARE?" : "CONFERMA?",
+        "dica “conferma” per " + (c.ripristino ? "ripristinare " : "") + c.progetto);
     } else if (c.fase === "inattivo") {
       misura("m-claude", "PRONTO", "nessun lavoro in corso");
     } else {
