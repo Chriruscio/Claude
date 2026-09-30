@@ -425,6 +425,25 @@ class TestClaudeCode(unittest.TestCase):
         lavoro._esegui(dettagli)
         self.assertIn("non e' riuscito", lavoro.prossimo_avviso())
 
+    def test_configurazione_istruisce_il_modello(self):
+        originali = (jarvis.SYSTEM_PROMPT, list(jarvis.TUTTI_I_TOOLS), dict(jarvis.ESECUTORI),
+                     jarvis.carica_progetti, jarvis.shutil.which, jarvis.versione_claude,
+                     jarvis.ESEGUIBILE_CLAUDE)
+        jarvis.carica_progetti = lambda percorso: {"sito": self.progetto}
+        jarvis.shutil.which = lambda nome: "claude"
+        jarvis.versione_claude = lambda eseguibile: (2, 1, 285)
+        try:
+            jarvis.configura_claude_code()
+            self.assertIn("claude_code", jarvis.ESECUTORI)
+            self.assertIn("Progetti dell'utente: sito", jarvis.SYSTEM_PROMPT)
+            self.assertIn("mai a scrivi_file", jarvis.SYSTEM_PROMPT)
+        finally:
+            (jarvis.SYSTEM_PROMPT, strumenti, esecutori, jarvis.carica_progetti,
+             jarvis.shutil.which, jarvis.versione_claude, jarvis.ESEGUIBILE_CLAUDE) = originali
+            jarvis.TUTTI_I_TOOLS[:] = strumenti
+            jarvis.ESECUTORI.clear()
+            jarvis.ESECUTORI.update(esecutori)
+
     def test_versione(self):
         risposta = SimpleNamespace(stdout="2.1.284 (Claude Code)\n")
         originale = jarvis.subprocess.run

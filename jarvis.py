@@ -954,7 +954,10 @@ def tool_scrivi_file(nome_file: str, contenuto: str, modalita: str = "sovrascriv
         return f"Errore di scrittura: {e}"
     azione = "aggiornato" if esisteva else "creato"
     relativo = percorso.relative_to(WORKSPACE.resolve())
-    return f"File {azione}: {relativo.as_posix()} ({percorso.stat().st_size} byte)"
+    # Dire sempre DOVE: in una prova reale il modello, senza questa indicazione,
+    # ha detto all'utente di aver scritto "nel progetto" un file finito qui.
+    return (f"File {azione} nella cartella di lavoro di Jarvis ({WORKSPACE}), NON in un progetto: "
+            f"{relativo.as_posix()} ({percorso.stat().st_size} byte)")
 
 
 def tool_leggi_file(nome_file: str) -> str:
@@ -1059,9 +1062,10 @@ TOOLS_LOCALI = [
     {
         "name": "scrivi_file",
         "description": (
-            "Crea o modifica un file di testo nella cartella di lavoro dell'utente. "
+            "Crea o modifica un file di testo nella cartella di lavoro privata di Jarvis "
+            "(appunti, liste, promemoria). "
             f"Usa percorsi relativi, es. 'note/spesa.md'. Estensioni ammesse: {_ESTENSIONI}. "
-            "Non puo' scrivere altrove."
+            "Non puo' scrivere altrove: NON usarlo mai per i progetti dell'utente."
         ),
         "input_schema": {
             "type": "object",
@@ -1079,7 +1083,7 @@ TOOLS_LOCALI = [
     },
     {
         "name": "leggi_file",
-        "description": "Legge un file di testo dalla cartella di lavoro dell'utente.",
+        "description": "Legge un file di testo dalla cartella di lavoro privata di Jarvis (non dai progetti).",
         "input_schema": {
             "type": "object",
             "properties": {"nome_file": {"type": "string"}},
@@ -1088,7 +1092,7 @@ TOOLS_LOCALI = [
     },
     {
         "name": "elenca_file",
-        "description": "Elenca i file nella cartella di lavoro o in una sua sottocartella.",
+        "description": "Elenca i file nella cartella di lavoro privata di Jarvis o in una sua sottocartella (non nei progetti).",
         "input_schema": {
             "type": "object",
             "properties": {"sottocartella": {"type": "string"}},
@@ -1374,7 +1378,7 @@ def tool_claude_code(progetto: str, compito: str) -> str:
 
 def configura_claude_code() -> None:
     """Aggiunge lo strumento solo se Claude Code e' installato, aggiornato e ci sono progetti."""
-    global ESEGUIBILE_CLAUDE, PROGETTI
+    global ESEGUIBILE_CLAUDE, PROGETTI, SYSTEM_PROMPT
     PROGETTI = carica_progetti(FILE_PROGETTI)
     if not PROGETTI:
         print(f"[Claude Code: nessun progetto. Per attivarlo crea {FILE_PROGETTI.name}]")
@@ -1394,10 +1398,11 @@ def configura_claude_code() -> None:
     TUTTI_I_TOOLS.insert(len(TOOLS_LOCALI), {
         "name": "claude_code",
         "description": (
-            "Affida a Claude Code un lavoro di programmazione o di modifica dei file in uno dei "
-            "progetti dell'utente (puo' leggere, creare e modificare file nella cartella del "
-            "progetto, non puo' eseguire comandi). Il lavoro NON parte subito: serve la conferma "
-            "a voce dell'utente. Descrivi il compito in modo completo e preciso."
+            "Affida a Claude Code un lavoro in uno dei progetti dell'utente: creare, leggere o "
+            "modificare file nella cartella del progetto (non puo' eseguire comandi). "
+            "E' l'UNICO modo per toccare i file di un progetto: ogni volta che l'utente nomina "
+            "un progetto usa questo strumento, mai scrivi_file. Il lavoro NON parte subito: "
+            "serve la conferma a voce dell'utente. Descrivi il compito in modo completo e preciso."
         ),
         "input_schema": {
             "type": "object",
@@ -1408,6 +1413,12 @@ def configura_claude_code() -> None:
             "required": ["progetto", "compito"],
         },
     })
+    SYSTEM_PROMPT += (
+        f"\n\nProgetti dell'utente: {', '.join(sorted(PROGETTI))}. Qualunque richiesta che "
+        "nomina un progetto va affidata allo strumento claude_code, mai a scrivi_file. "
+        "Non dire mai di aver fatto qualcosa in un progetto se claude_code non l'ha fatto: "
+        "riferisci sempre esattamente dove e' stato salvato un file."
+    )
     print(f"[Claude Code {'.'.join(map(str, versione))}: progetti {', '.join(sorted(PROGETTI))}]")
 
 
