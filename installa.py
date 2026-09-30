@@ -280,6 +280,7 @@ def installa_mac() -> None:
     if not prepara_portaudio_mac() or not installa_pacchetti():
         return
     chiave_nel_portachiavi_mac()
+    installa_parola_locale()
     chiedi_whisper()
     crea_app_mac()
     chiedi_avvio_automatico_mac()
@@ -303,6 +304,21 @@ def chiedi_whisper() -> None:
         return
     imposta_variabile("JARVIS_STT", "whisper")
     print("  Attivato. Vale dal prossimo avvio di Jarvis (per tornare a Google rilancia e rispondi n).")
+
+
+def installa_parola_locale() -> None:
+    """openWakeWord + modello "hey_jarvis": 'ehi Jarvis' riconosciuto sul computer."""
+    print("\nRiconoscimento di 'ehi Jarvis' sul computer (openWakeWord)")
+    esito = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "openwakeword"])
+    if esito.returncode != 0:
+        print("  Non installato: Jarvis funzionera' come prima (cerca 'Jarvis' trascrivendo con Google).")
+        return
+    # In un processo nuovo: il pacchetto appena installato non sempre si importa in questo.
+    scarica = ("import openwakeword.utils as u; u.download_models(model_names=['hey_jarvis']); "
+               "from openwakeword.model import Model; "
+               "Model(wakeword_models=['hey_jarvis'], inference_framework='onnx'); print('  Modello pronto.')")
+    if subprocess.run([sys.executable, "-c", scarica]).returncode != 0:
+        print("  Modello non scaricato ora: Jarvis riprovera' al primo avvio.")
 
 
 def imposta_variabile(nome: str, valore: str) -> None:
@@ -331,6 +347,7 @@ def main() -> None:
     print(f"Installazione di J.A.R.V.I.S. dalla cartella {CARTELLA_CODICE}")
     if installa_pacchetti():
         controlla_chiave()
+        installa_parola_locale()
         chiedi_whisper()
         # Nuovo processo: un pacchetto appena installato (pywin32) non sempre e'
         # importabile nel processo che l'ha installato.

@@ -4,14 +4,17 @@ Test della logica di J.A.R.V.I.S. che non richiede microfono, voce o API reale.
 Avvio:  python3 -m unittest test_jarvis -v      (Windows: py -m unittest test_jarvis -v)
 """
 
+import array
 import http.client
 import json
 import math
 import os
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 from types import SimpleNamespace
 
 import jarvis
@@ -859,6 +862,94 @@ class TestVitaQuotidiana(unittest.TestCase):
     def test_agenda_e_memoria_nella_barriera(self):
         self.assertIn("agenda", jarvis.STRUMENTI_CHE_LEGGONO)
         self.assertTrue({"ricorda", "dimentica"} <= jarvis.STRUMENTI_CHE_AGISCONO)
+
+
+class ModelloParolaFinto:
+    """Come openWakeWord: predict() per blocco; qui il punteggio sale ai blocchi indicati."""
+
+    def __init__(self, scatta_a=()):
+        self.scatta_a = set(scatta_a)
+        self.n = -1
+        self.azzerato = 0
+
+    def predict(self, blocco):
+        self.n += 1
+        return {"hey_jarvis": 0.9 if self.n in self.scatta_a else 0.01}
+
+    def reset(self):
+        self.azzerato += 1
+
+
+def _blocco(livello=0):
+    """80 ms di audio: silenzio (0) oppure un'onda quadra dell'ampiezza indicata."""
+    return array.array("h", [livello if i % 2 else -livello for i in range(jarvis.BLOCCO_PAROLA)]).tobytes()
+
+
+class TestParolaLocale(unittest.TestCase):
+    VOCE, SILENZIO = _blocco(2000), _blocco(0)
+
+    def test_frase_detta_dopo_il_nome(self):
+        # 10 blocchi di silenzio, scatta, poi 0,4 s di silenzio, 1 s di voce, silenzio
+        blocchi = [self.SILENZIO] * 11 + [self.SILENZIO] * 5 + [self.VOCE] * 12 + [self.SILENZIO] * 30
+        modello = ModelloParolaFinto(scatta_a=[10])
+        esito = jarvis.AscoltoParola(modello).aspetta(blocchi, soglia_voce=300, applauso=False)
+        self.assertIsInstance(esito, bytes)
+        self.assertIn(self.VOCE * 12, esito)
+        self.assertEqual(modello.azzerato, 1)   # niente doppio scatto sulla stessa parola
+
+    def test_comando_gia_cominciato_quando_scatta(self):
+        # Il modello scatta in ritardo: "ehi Jarvis" (voce), pausa, e il comando e' gia' partito.
+        nome, pausa, inizio_comando = [self.VOCE] * 8, [self.SILENZIO] * 2, [_blocco(1500)] * 4
+        blocchi = [self.SILENZIO] * 5 + nome + pausa + inizio_comando + [self.VOCE] * 6 + [self.SILENZIO] * 30
+        scatto = 5 + 8 + 2 + 4 - 1   # all'ultimo blocco dell'inizio del comando
+        esito = jarvis.AscoltoParola(ModelloParolaFinto([scatto])).aspetta(
+            blocchi, soglia_voce=300, applauso=False)
+        self.assertTrue(esito.startswith(self.SILENZIO + _blocco(1500) * 4))
+        self.assertIn(self.VOCE * 6, esito)
+        self.assertNotIn(self.VOCE * 8 + self.SILENZIO, esito)   # "ehi Jarvis" resta fuori
+
+    def test_solo_ehi_jarvis(self):
+        blocchi = [self.SILENZIO] * 5 + [self.SILENZIO] * 40
+        esito = jarvis.AscoltoParola(ModelloParolaFinto([4])).aspetta(blocchi, soglia_voce=300, applauso=False)
+        self.assertEqual(esito, b"")
+
+    def test_senza_nome_non_esce_niente(self):
+        blocchi = [self.VOCE] * 50   # si parla, ma il modello non scatta mai
+        self.assertIsNone(jarvis.AscoltoParola(ModelloParolaFinto()).aspetta(
+            blocchi, soglia_voce=300, applauso=False))
+
+    def test_interrotto_da_un_avviso(self):
+        chiamate = []
+
+        def interrompi():
+            chiamate.append(1)
+            return len(chiamate) == 2
+
+        esito = jarvis.AscoltoParola(ModelloParolaFinto()).aspetta(
+            iter(lambda: self.SILENZIO, None), interrompi, applauso=False)
+        self.assertIsNone(esito)
+
+    def test_doppio_applauso(self):
+        colpo = _blocco(8000)
+        blocchi = [self.SILENZIO] * 20 + [colpo] + [self.SILENZIO] * 4 + [colpo] + [self.SILENZIO] * 20
+        esito = jarvis.AscoltoParola(ModelloParolaFinto()).aspetta(blocchi, soglia_voce=300, applauso=True)
+        self.assertEqual(esito, jarvis.APPLAUSO)
+
+    def test_senza_openwakeword_si_torna_a_google(self):
+        with mock.patch.dict(sys.modules, {"openwakeword": None, "openwakeword.utils": None,
+                                           "openwakeword.model": None}):
+            self.assertIsNone(jarvis.carica_parola_locale())
+
+    def test_promemoria_scaduto_senza_consumarlo(self):
+        from datetime import datetime, timedelta
+        with tempfile.TemporaryDirectory() as tmp:
+            p = jarvis.Promemoria(Path(tmp) / "p.json")
+            adesso = datetime.now()
+            self.assertFalse(p.ce_ne_scaduti(adesso))
+            p.aggiungi(adesso - timedelta(seconds=1), "pasta")
+            self.assertTrue(p.ce_ne_scaduti(adesso))
+            self.assertTrue(p.ce_ne_scaduti(adesso))          # non lo toglie
+            self.assertEqual(p.scaduti(adesso), ["pasta"])
 
 
 class TestMail(unittest.TestCase):

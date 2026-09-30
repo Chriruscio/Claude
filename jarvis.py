@@ -135,6 +135,16 @@ PROMPT_WHISPER = "Jarvis, che ore sono? Jarvis, apri Chrome. Conferma. Jarvis, d
 # Doppio battito di mani = "ehi Jarvis" (idea presa da Julian-Ivanov/jarvis-voice-assistant).
 APPLAUSO_ATTIVO = os.environ.get("JARVIS_APPLAUSO", "1") != "0"
 APPLAUSO = "\x00applauso"   # valore speciale restituito da Orecchie.ascolta()
+
+# "Ehi Jarvis" riconosciuto sul PC con openWakeWord (modello gia' pronto "hey_jarvis"):
+# fuori dalla finestra di ascolto il microfono resta sul computer e a Google (o a Whisper)
+# va solo la frase detta dopo il nome. "0" per tornare a trascrivere tutto.
+# Il modello riconosce "ehi/hey Jarvis", NON "Jarvis" da solo (provato con voce sintetica).
+PAROLA_LOCALE_ATTIVA = os.environ.get("JARVIS_PAROLA_LOCALE", "1") != "0"
+SOGLIA_PAROLA = float(os.environ.get("JARVIS_SOGLIA_PAROLA", "0.5"))
+BLOCCO_PAROLA = 1280          # campioni: 80 ms a 16 kHz, il passo che openWakeWord si aspetta
+DURATA_BLOCCO = BLOCCO_PAROLA / 16000
+ATTESA_DOPO_PAROLA = 1.2      # secondi: se non si parla entro questo tempo era solo "ehi Jarvis"
 MAX_BYTE_LETTURA = 20_000     # troncamento in lettura file
 
 WORKSPACE = Path(
@@ -998,8 +1008,68 @@ class Orecchie:
             self.recognizer.adjust_for_ambient_noise(source, duration=1.0)
         print(f"[Soglia energia impostata a {self.recognizer.energy_threshold:.0f}]")
         self.whisper = carica_whisper() if STT_MOTORE == "whisper" else None
+        modello = carica_parola_locale()
+        self.parola = AscoltoParola(modello) if modello is not None else None
         print(f"[Riconoscimento vocale: {'Whisper ' + WHISPER_MODELLO + ' sul PC' if self.whisper else 'Google'}"
+              f"{' · ehi Jarvis riconosciuto sul PC' if self.parola else ''}"
               f"{' · doppio applauso attivo' if APPLAUSO_ATTIVO else ''}]")
+
+    def aspetta_parola(self, interrompi) -> str | None:
+        """
+        Resta in ascolto sul PC finche' non sente "ehi Jarvis" (o un doppio applauso).
+        Restituisce None se interrotto (avvisi da leggere) o se il microfono non si apre,
+        APPLAUSO, oppure la frase detta subito dopo il nome ("" se non ne e' seguita una).
+        """
+        pa = flusso = None
+        try:
+            pa = pyaudio.PyAudio()
+            flusso = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True,
+                             frames_per_buffer=BLOCCO_PAROLA)
+        except (OSError, AttributeError) as e:
+            print(f"[Microfono a 16 kHz non disponibile per 'ehi Jarvis' sul PC ({e}): uso Google]")
+            self.parola = None
+            if pa is not None:
+                pa.terminate()
+            return None
+
+        def blocchi():
+            while True:
+                yield flusso.read(BLOCCO_PAROLA, exception_on_overflow=False)
+
+        try:
+            esito = self.parola.aspetta(
+                blocchi(), interrompi, soglia_voce=max(self.recognizer.energy_threshold, 150.0),
+                al_nome=lambda: HUD.imposta("attento"))   # segnale visivo mentre si parla
+        finally:
+            flusso.stop_stream()
+            flusso.close()
+            pa.terminate()
+        if esito is None or esito == APPLAUSO:
+            if esito == APPLAUSO:
+                print("[Doppio applauso]")
+            return esito
+        print("[Ehi Jarvis]")
+        if not esito:
+            return ""
+        fine_parlato = time.monotonic()
+        TEMPI["_fine_parlato"] = fine_parlato
+        return self._testo(sr.AudioData(esito, 16000, 2), fine_parlato)
+
+    def _testo(self, audio, fine_parlato: float) -> str:
+        try:
+            testo = self._trascrivi(audio)
+            TEMPI["trascrizione"] = time.monotonic() - fine_parlato
+        except sr.UnknownValueError:
+            return ""
+        except sr.RequestError as e:
+            print(f"[Servizio di trascrizione non raggiungibile: {e}]")
+            return ""
+        except Exception as e:   # Whisper: un errore non deve fermare l'ascolto
+            print(f"[Trascrizione non riuscita: {type(e).__name__}: {e}]")
+            return ""
+        if testo:
+            print(f"Tu: {testo}")
+        return testo
 
     def _trascrivi(self, audio) -> str:
         if self.whisper is not None:
@@ -1035,20 +1105,108 @@ class Orecchie:
             if len(grezzo) <= 2 * 16000 * 4 and rileva_doppio_applauso(array.array("h", grezzo)):
                 print("[Doppio applauso]")
                 return APPLAUSO
+        return self._testo(audio, fine_parlato)
+
+
+def carica_parola_locale():
+    """Modello openWakeWord "hey_jarvis"; None (e si trascrive tutto come prima) se manca."""
+    if not PAROLA_LOCALE_ATTIVA:
+        return None
+    try:
+        import openwakeword.utils
+        from openwakeword.model import Model
+    except ImportError:
+        print("[openWakeWord non installato (py -3.13 -m pip install openwakeword): "
+              "'Jarvis' viene cercato trascrivendo tutto con Google]")
+        return None
+    try:
         try:
-            testo = self._trascrivi(audio)
-            TEMPI["trascrizione"] = time.monotonic() - fine_parlato
-        except sr.UnknownValueError:
-            return ""
-        except sr.RequestError as e:
-            print(f"[Servizio di trascrizione non raggiungibile: {e}]")
-            return ""
-        except Exception as e:   # Whisper: un errore non deve fermare l'ascolto
-            print(f"[Trascrizione non riuscita: {type(e).__name__}: {e}]")
-            return ""
-        if testo:
-            print(f"Tu: {testo}")
-        return testo
+            return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+        except Exception:
+            # Primo avvio: i modelli (pochi MB) non sono ancora stati scaricati.
+            print("[Scarico il modello di 'ehi Jarvis' (pochi MB)...]")
+            openwakeword.utils.download_models(model_names=["hey_jarvis"])
+            return Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
+    except Exception as e:
+        print(f"[Modello di 'ehi Jarvis' non caricato ({type(e).__name__}: {e}): uso Google]")
+        return None
+
+
+def livello_audio(blocco: bytes) -> float:
+    """Volume medio (RMS) di un blocco int16, nella stessa scala della soglia di SpeechRecognition."""
+    campioni = array.array("h", blocco)
+    return math.sqrt(sum(c * c for c in campioni) / len(campioni)) if campioni else 0.0
+
+
+class AscoltoParola:
+    """
+    Logica dell'attesa di "ehi Jarvis", separata dal microfono per poterla provare:
+    riceve blocchi da 80 ms e un modello con predict()/reset() (openWakeWord).
+    """
+
+    CONTROLLO_INTERRUZIONE = 12   # blocchi: circa ogni secondo
+    CONTROLLO_APPLAUSO = 5        # blocchi: circa ogni 0,4 s, sugli ultimi 2,5 s
+    RIPRESA = 15                  # blocchi (1,2 s) gia' ascoltati da riesaminare quando scatta
+
+    def __init__(self, modello, soglia: float = SOGLIA_PAROLA) -> None:
+        self.modello = modello
+        self.soglia = soglia
+
+    def aspetta(self, blocchi, interrompi=lambda: False, soglia_voce: float = 300.0,
+                applauso: bool = APPLAUSO_ATTIVO, al_nome=lambda: None):
+        import numpy
+        flusso = iter(blocchi)
+        recenti: deque = deque(maxlen=round(2.5 / DURATA_BLOCCO))
+        for n, blocco in enumerate(flusso):
+            if n % self.CONTROLLO_INTERRUZIONE == 0 and interrompi():
+                return None
+            recenti.append(blocco)
+            punteggi = self.modello.predict(numpy.frombuffer(blocco, dtype=numpy.int16))
+            if max(punteggi.values(), default=0.0) >= self.soglia:
+                self.modello.reset()   # altrimenti la stessa parola scatta di nuovo al giro dopo
+                al_nome()
+                return self._frase_seguente(flusso, soglia_voce, list(recenti)[-self.RIPRESA:])
+            if (applauso and n % self.CONTROLLO_APPLAUSO == 0 and len(recenti) == recenti.maxlen
+                    and rileva_doppio_applauso(array.array("h", b"".join(recenti)))):
+                self.modello.reset()
+                return APPLAUSO
+        return None
+
+    @staticmethod
+    def _frase_seguente(flusso, soglia_voce: float, precedenti: list[bytes] = ()) -> bytes:
+        """
+        Registra dallo stesso flusso, senza riaprire il microfono. Il modello scatta in
+        ritardo (provato: ~0,3 s dopo l'inizio del comando, in "ehi Jarvis, apri..."),
+        quindi si riprendono i blocchi gia' ascoltati dopo l'ultima pausa: se li' c'e' voce,
+        il comando e' gia' cominciato. Se vi finisce un pezzo di "Jarvis" non fa danno:
+        il nome viene comunque tolto dalla frase. b"" = nessuna frase.
+        """
+        prima: deque = deque(maxlen=4)    # ~0,3 s prima che la voce superi la soglia
+        frase: list[bytes] = []
+        forti = [livello_audio(b) >= soglia_voce for b in precedenti]
+        if forti and forti[-1]:
+            pausa = max((i for i, f in enumerate(forti) if not f), default=0)
+            frase = list(precedenti[pausa:])
+        else:
+            prima.extend(precedenti)
+        trascorso = silenzio = 0.0
+        for blocco in flusso:
+            trascorso += DURATA_BLOCCO
+            forte = livello_audio(blocco) >= soglia_voce
+            if not frase:
+                if forte:
+                    frase.extend(prima)
+                    frase.append(blocco)
+                elif trascorso >= ATTESA_DOPO_PAROLA:
+                    return b""
+                else:
+                    prima.append(blocco)
+                continue
+            frase.append(blocco)
+            silenzio = 0.0 if forte else silenzio + DURATA_BLOCCO
+            if silenzio >= PAUSA_FINE_FRASE or trascorso >= PHRASE_TIME_LIMIT:
+                break
+        return b"".join(frase)
 
 
 # Frasi che Whisper "inventa" sul silenzio o sul rumore (residui dei sottotitoli con
@@ -1561,6 +1719,11 @@ class Promemoria:
             tolta = voci.pop(numero - 1)
             self._scrivi(voci)
             return tolta
+
+    def ce_ne_scaduti(self, adesso: datetime) -> bool:
+        """Come scaduti() ma senza toglierli: serve per interrompere l'attesa di 'ehi Jarvis'."""
+        with self._lock:
+            return any(datetime.fromisoformat(v["quando"]) <= adesso for v in self._leggi())
 
     def scaduti(self, adesso: datetime) -> list[str]:
         with self._lock:
@@ -2376,6 +2539,10 @@ class LavoroClaudeCode:
         with self._lock:
             self.avvisi.append((parlato, completo or parlato))
 
+    def ha_avvisi(self) -> bool:
+        with self._lock:
+            return bool(self.avvisi)
+
     def prossimo_avviso(self) -> str | None:
         """Solo la parte da leggere a voce."""
         prossimo = self.prossimo_avviso_completo()
@@ -2803,8 +2970,12 @@ def main() -> None:
     print(f"[Voce: {voce}]")
     print(f"[Cartella di lavoro: {WORKSPACE}]")
     print(f"[Strumenti: {', '.join(ESECUTORI)}, web_search]")
-    print(f"[Rispondo alle frasi con 'Jarvis' e, per {FINESTRA_ASCOLTO} secondi dopo ogni risposta, "
-          "anche senza. 'Jarvis, dormi' per la pausa.]")
+    if orecchie.parola is not None:
+        print(f"[Mi attivo con 'ehi Jarvis' (riconosciuto sul PC) e, per {FINESTRA_ASCOLTO} secondi "
+              "dopo ogni risposta, anche senza nome. 'Ehi Jarvis, dormi' per la pausa.]")
+    else:
+        print(f"[Rispondo alle frasi con 'Jarvis' e, per {FINESTRA_ASCOLTO} secondi dopo ogni risposta, "
+              "anche senza. 'Jarvis, dormi' per la pausa.]")
     parla(f"{saluto()}. Tutti i sistemi sono operativi.")
 
     while True:
@@ -2830,7 +3001,22 @@ def main() -> None:
                 HUD.imposta("dorme")
             else:
                 HUD.imposta("attento" if in_finestra else "ascolto")
-            frase = orecchie.ascolta(attesa)
+            if orecchie.parola is not None and not in_finestra and not LAVORO.ha_attesa(ora):
+                # Fuori dalla finestra (e senza conferme in sospeso) il microfono resta sul PC
+                # finche' non sente "ehi Jarvis": a Google va solo la frase che segue.
+                sentita = orecchie.aspetta_parola(
+                    lambda: LAVORO.ha_avvisi() or PROMEMORIA.ce_ne_scaduti(datetime.now()))
+                if sentita is None:
+                    continue
+                if sentita != APPLAUSO:
+                    if attenzione.dorme and sentita:
+                        attenzione.dorme = False   # "ehi Jarvis, <domanda>" sveglia e risponde
+                    # Il nome l'ha gia' sentito il PC: lo si rimette davanti alla frase cosi'
+                    # la valutano le stesse regole ("ehi Jarvis" da solo = "Mi dica").
+                    sentita = f"Jarvis, {sentita}" if sentita else "Jarvis"
+                frase = sentita
+            else:
+                frase = orecchie.ascolta(attesa)
             if not frase:
                 if in_finestra:
                     attenzione.chiudi_finestra()
