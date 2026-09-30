@@ -328,7 +328,22 @@ class TestInstallatore(unittest.TestCase):
     def test_niente_powershell_per_i_collegamenti(self):
         import installa
         self.assertFalse(hasattr(installa, "PS_COLLEGAMENTO"))
-        self.assertIn("pywin32", installa.PACCHETTI)
+        self.assertNotIn("pywin32", installa.PACCHETTI_COMUNI)      # su Mac non esiste
+        self.assertEqual("pywin32" in installa.PACCHETTI, installa.platform.system() == "Windows")
+
+    def test_impostazioni_mac(self):
+        import installa
+        with tempfile.TemporaryDirectory() as tmp:
+            originale = installa.FILE_IMPOSTAZIONI_MAC
+            installa.FILE_IMPOSTAZIONI_MAC = Path(tmp) / "impostazioni.sh"
+            try:
+                installa.imposta_variabile_mac("JARVIS_STT", "whisper")
+                installa.imposta_variabile_mac("JARVIS_PAUSA", "1.0")
+                installa.imposta_variabile_mac("JARVIS_STT", "google")      # sostituisce, non duplica
+                testo = installa.FILE_IMPOSTAZIONI_MAC.read_text(encoding="utf-8")
+            finally:
+                installa.FILE_IMPOSTAZIONI_MAC = originale
+        self.assertEqual(testo, "export JARVIS_PAUSA=1.0\nexport JARVIS_STT=google\n")
 
 
 class TestClaudeCode(unittest.TestCase):
@@ -762,6 +777,88 @@ class TestApplausoEWhisper(unittest.TestCase):
         self.assertEqual(jarvis.testo_da_whisper([seg(" Sottotitoli a cura di QTSS")]), "")
         self.assertEqual(jarvis.testo_da_whisper([seg(" Grazie.", p=0.9)]), "")    # probabile silenzio
         self.assertEqual(jarvis.testo_da_whisper([]), "")
+
+
+class TestVitaQuotidiana(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        cartella = Path(self._tmp.name)
+        self._originali = (jarvis.FILE_MEMORIA, jarvis.PROMEMORIA)
+        jarvis.FILE_MEMORIA = cartella / "memoria.json"
+        jarvis.PROMEMORIA = jarvis.Promemoria(cartella / "promemoria.json")
+
+    def tearDown(self):
+        jarvis.FILE_MEMORIA, jarvis.PROMEMORIA = self._originali
+        self._tmp.cleanup()
+
+    def test_memoria(self):
+        self.assertEqual(jarvis.testo_memoria_per_il_prompt(), "")
+        jarvis.tool_ricorda("Mia moglie si chiama Anna")
+        jarvis.tool_ricorda("Il codice del cancello e' al lavoro")
+        self.assertIn("- Mia moglie si chiama Anna", jarvis.testo_memoria_per_il_prompt())
+        self.assertIn("Dimenticate 1", jarvis.tool_dimentica("cancello"))
+        self.assertNotIn("cancello", jarvis.testo_memoria_per_il_prompt())
+
+    def test_memoria_e_nel_prompt_di_ogni_chiamata(self):
+        jarvis.tool_ricorda("Preferisco il caffe' amaro")
+        inviato = {}
+
+        class Client:
+            def __init__(self):
+                self.messages = self
+
+            def create(self, **k):
+                inviato.update(k)
+                return _risposta("end_turn", _testo("Certo."))
+
+        jarvis.chiedi_a_claude(Client(), [], "come prendo il caffe'?")
+        self.assertIn("caffe' amaro", inviato["system"])
+
+    def test_calcola_quando(self):
+        from datetime import datetime
+        adesso = datetime(2026, 9, 30, 18, 0)
+        self.assertEqual(jarvis.calcola_quando(10, None, adesso), datetime(2026, 9, 30, 18, 10))
+        self.assertEqual(jarvis.calcola_quando(None, "19:30", adesso), datetime(2026, 9, 30, 19, 30))
+        self.assertEqual(jarvis.calcola_quando(None, "7.15", adesso), datetime(2026, 10, 1, 7, 15))  # domani
+        for sbagliato in [(0, None), (-5, None), (None, "25:00"), (None, "domani"), (None, None)]:
+            with self.subTest(sbagliato):
+                self.assertIsNone(jarvis.calcola_quando(*sbagliato, adesso))
+
+    def test_promemoria_scadono_una_volta(self):
+        from datetime import datetime, timedelta
+        adesso = datetime.now()
+        jarvis.PROMEMORIA.aggiungi(adesso - timedelta(seconds=1), "togliere la pasta")
+        jarvis.PROMEMORIA.aggiungi(adesso + timedelta(hours=1), "chiamare Mario")
+        self.assertEqual(jarvis.PROMEMORIA.scaduti(adesso), ["togliere la pasta"])
+        self.assertEqual(jarvis.PROMEMORIA.scaduti(adesso), [])
+        self.assertIn("1. ", jarvis.tool_elenca_promemoria())
+        self.assertIn("Cancellato: chiamare Mario", jarvis.tool_cancella_promemoria(1))
+        self.assertEqual(jarvis.tool_elenca_promemoria(), "Nessun promemoria attivo.")
+
+    def test_audio_azione_sconosciuta(self):
+        self.assertIn("sconosciuta", jarvis.tool_controlla_audio("esplodi"))
+
+    def test_meteo(self):
+        risposte = iter([
+            {"results": [{"name": "Roma", "latitude": 41.9, "longitude": 12.5}]},
+            {"current": {"temperature_2m": 21.4, "weather_code": 1, "wind_speed_10m": 8.2},
+             "daily": {"time": ["a", "b", "c"], "weather_code": [0, 61, 95],
+                       "temperature_2m_min": [14, 13, 12], "temperature_2m_max": [24, 20, 18],
+                       "precipitation_probability_max": [0, 70, None]}},
+        ])
+        originale = jarvis._scarica_json
+        jarvis._scarica_json = lambda indirizzo: next(risposte)
+        try:
+            esito = jarvis.tool_meteo("Roma")
+        finally:
+            jarvis._scarica_json = originale
+        self.assertIn("Roma adesso: poco nuvoloso, 21 gradi", esito)
+        self.assertIn("Domani: pioggia leggera, min 13 max 20, pioggia 70%", esito)
+        self.assertIn("Dopodomani: temporale", esito)
+
+    def test_agenda_e_memoria_nella_barriera(self):
+        self.assertIn("agenda", jarvis.STRUMENTI_CHE_LEGGONO)
+        self.assertTrue({"ricorda", "dimentica"} <= jarvis.STRUMENTI_CHE_AGISCONO)
 
 
 class TestMail(unittest.TestCase):
