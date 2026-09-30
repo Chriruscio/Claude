@@ -78,10 +78,11 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - Permessi macOS non ancora concessi: Microfono per il Terminale, Automazione per `chiudi_app`.
 - Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
 - Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
-- HUD nuovo (sfera 3D, pannelli, onda) verificato solo su Linux: Chromium headless, schermate desktop e telefono, circa 60 fotogrammi al secondo senza GPU. Segnali sonori e sincronia voce/animazione mai sentiti né visti su Windows.
+- HUD nuovo (sfera 3D, pannelli, onda, segnali sonori) verificato anche su Windows dall'utente.
 - Voce neurale verificata su Windows: l'utente ha scelto it-IT-GiuseppeMultilingualNeural tra le voci maschili multilingue. Grafie di `PRONUNCIA` non ancora ascoltate.
 - Windows: ciclo completo verificato con chiamate API reali (domanda, strumento, risposta a voce). "Ehi Jarvis" da solo trascritto male da Google ("Ehi ya"): più affidabile "Jarvis" all'inizio di una frase.
-- `installa.py` su Windows: installazione dei pacchetti riuscita; creazione dei collegamenti via PowerShell bloccata ("Accesso negato"), sostituita con pywin32, non ancora riprovata.
+- `installa.py` verificato su Windows (30/09/2026): pacchetti, collegamento sul desktop e avvio automatico creati con pywin32. La versione con PowerShell era stata bloccata ("Accesso negato").
+- Verificato su Windows (30/09/2026) con avvio dall'icona, senza finestre: saluto a voce, "Ehi Jarvis" (segnale, "Mi dica", apertura dell'HUD), sfera sincronizzata con la voce neurale, pausa e risveglio.
 - Claude Code dentro J.A.R.V.I.S.: progettato (solo cartelle elencate a mano, conferma vocale riconosciuta localmente, `--restricted` con soli strumenti sui file, compito via stdin, ambiente senza `ANTHROPIC_API_KEY` perché in `-p` la chiave vince sempre sull'abbonamento) ma non implementato: la modifica è stata bloccata dal controllo di sicurezza dell'ambiente di sviluppo. Decisione rimandata all'utente.
 - Chiave API e Claude Code: l'utente usa Claude Code dal web (sessioni cloud, sempre con l'abbonamento Max) e dall'app desktop su un'altra macchina (Windows Server, abbonamento Max; l'app desktop non legge `ANTHROPIC_API_KEY`). Rischio solo se in futuro userà `claude` da terminale sul PC di Jarvis: lì, con la variabile impostata, può usare la chiave e il credito.
 - Mai eseguito finora: tutto il lato Mac.
