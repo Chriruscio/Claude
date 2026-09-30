@@ -7,11 +7,11 @@ dichiarati in TOOLS_LOCALI, e lettura e scrittura file sono confinate a una sand
 
 Requisiti macOS:
     brew install portaudio
-    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil
     export ANTHROPIC_API_KEY="sk-ant-..."
 
 Requisiti Windows (PowerShell):
-    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio
+    pip install anthropic SpeechRecognition pyaudio edge-tts miniaudio psutil
     setx ANTHROPIC_API_KEY "sk-ant-..."     (poi riaprire il terminale)
 
 Avvio:
@@ -65,15 +65,29 @@ try:
 except ImportError:
     sys.exit("Manca 'SpeechRecognition'. Esegui: pip install SpeechRecognition pyaudio")
 
+import array
+import math
+
+# pyaudio serve gia' al microfono; qui lo si usa anche per suonare voce e segnali.
+try:
+    import pyaudio
+except ImportError:
+    pyaudio = None
+
 # Voce neurale: facoltativa. Se manca, si usa la voce di sistema.
 try:
     import asyncio
     import edge_tts
     import miniaudio
-    import pyaudio
-    NEURALE_INSTALLATA = True
+    NEURALE_INSTALLATA = pyaudio is not None
 except ImportError:
     NEURALE_INSTALLATA = False
+
+# Dati di CPU e memoria per l'HUD: facoltativi.
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 
 # ==========================================================================
@@ -100,6 +114,7 @@ MAX_RICERCHE_WEB = 3          # tetto per richiesta: ogni ricerca costa ~0,01 $ 
 MAX_GIRI_TOOL = 6             # anti-loop sul ciclo di tool use
 LISTEN_TIMEOUT = 6
 FINESTRA_ASCOLTO = 8          # secondi, dopo una risposta, in cui non serve dire "Jarvis"
+SUONI_ATTIVI = os.environ.get("JARVIS_SUONI", "1") != "0"   # segnali di attivazione e riposo
 
 HUD_ATTIVO = os.environ.get("JARVIS_HUD", "1") != "0"
 HUD_PORTA = int(os.environ.get("JARVIS_HUD_PORTA", "8765"))
@@ -295,6 +310,22 @@ class Hud:
         self.storico: deque = deque(maxlen=12)
         self.versione = 0
         self.ultimo_contatto = 0.0
+        self.sistema: dict = {}
+        self.voce: dict = {"id": 0, "inizio": 0, "passo": 50, "livelli": []}
+
+    def imposta_sistema(self, dati: dict) -> None:
+        with self._lock:
+            self.sistema = dati
+
+    def imposta_voce(self, livelli: list[float], inizio_ms: float, passo_ms: int) -> None:
+        """Volume della voce nel tempo: la pagina anima il reattore seguendolo."""
+        with self._lock:
+            self.voce = {
+                "id": self.voce["id"] + 1,
+                "inizio": inizio_ms,
+                "passo": passo_ms,
+                "livelli": livelli,
+            }
 
     def imposta(self, stato: str, dettaglio: str = "") -> None:
         with self._lock:
@@ -314,6 +345,8 @@ class Hud:
                 "storico": list(self.storico),
                 "versione": self.versione,
                 "consumi": CONSUMI.riepilogo(),
+                "sistema": self.sistema,
+                "voce": self.voce,
             }
 
     def pagina_aperta(self) -> bool:
@@ -399,6 +432,93 @@ def apri_hud() -> None:
     webbrowser.open(URL_HUD)
 
 
+def raccogli_sistema() -> dict:
+    """Istantanea di CPU, memoria, disco e batteria per i pannelli dell'HUD."""
+    dati: dict = {"cpu": None, "ram": None, "ram_usata": None, "ram_totale": None,
+                  "disco": None, "disco_libero": None, "batteria": None, "in_carica": None}
+    gb = 1024 ** 3
+    try:
+        uso = shutil.disk_usage(Path.home().anchor or "/")
+        dati["disco"] = round(100 * (uso.total - uso.free) / uso.total, 1)
+        dati["disco_libero"] = round(uso.free / gb)
+    except OSError:
+        pass
+    if psutil is not None:
+        dati["cpu"] = psutil.cpu_percent(interval=None)
+        memoria = psutil.virtual_memory()
+        dati["ram"] = memoria.percent
+        dati["ram_usata"] = round((memoria.total - memoria.available) / gb, 1)
+        dati["ram_totale"] = round(memoria.total / gb, 1)
+        try:
+            batteria = psutil.sensors_battery()
+        except (AttributeError, NotImplementedError, OSError):
+            batteria = None
+        if batteria is not None:
+            dati["batteria"] = round(batteria.percent)
+            dati["in_carica"] = bool(batteria.power_plugged)
+    return dati
+
+
+def avvia_monitor_sistema(intervallo: float = 2.0) -> None:
+    def ciclo() -> None:
+        while True:
+            try:
+                HUD.imposta_sistema(raccogli_sistema())
+            except Exception as e:   # il monitor non deve mai far cadere J.A.R.V.I.S.
+                print(f"[Monitor di sistema: {type(e).__name__}: {e}]")
+            time.sleep(intervallo)
+
+    if psutil is None:
+        print("[Per CPU e memoria nell'HUD: pip install psutil]")
+    threading.Thread(target=ciclo, daemon=True).start()
+
+
+# ==========================================================================
+# SEGNALI SONORI
+# Sintetizzati al volo e suonati da Python: una pagina web non puo' suonare
+# finche' l'utente non ci clicca sopra, quindi non sarebbe affidabile.
+# ==========================================================================
+
+FREQUENZA_AUDIO = 24000
+
+
+def sintetizza_segnale(note: list[tuple[float, float]], volume: float = 0.18) -> bytes:
+    """note: (frequenza in Hz, durata in secondi). Attacco e rilascio morbidi, niente click."""
+    campioni = array.array("h")
+    for frequenza, durata in note:
+        n = int(FREQUENZA_AUDIO * durata)
+        sfuma = max(1, int(FREQUENZA_AUDIO * 0.012))
+        for i in range(n):
+            inviluppo = min(1.0, i / sfuma, (n - i) / sfuma)
+            campione = math.sin(2 * math.pi * frequenza * i / FREQUENZA_AUDIO)
+            campione += 0.25 * math.sin(4 * math.pi * frequenza * i / FREQUENZA_AUDIO)   # armonica: piu' "metallico"
+            campioni.append(int(32767 * volume * inviluppo * campione / 1.25))
+    return campioni.tobytes()
+
+
+SEGNALI = {
+    "attivo": [(880.0, 0.07), (1318.5, 0.11)],    # sale: la ascolto
+    "riposo": [(1318.5, 0.07), (659.3, 0.14)],    # scende: vado in pausa
+}
+
+
+def suona(nome: str) -> None:
+    if not SUONI_ATTIVI or pyaudio is None or nome not in SEGNALI:
+        return
+    uscita = None
+    try:
+        uscita = pyaudio.PyAudio()
+        flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=FREQUENZA_AUDIO, output=True)
+        flusso.write(sintetizza_segnale(SEGNALI[nome]))
+        flusso.stop_stream()
+        flusso.close()
+    except OSError as e:
+        print(f"[Segnale sonoro non riprodotto: {e}]")
+    finally:
+        if uscita is not None:
+            uscita.terminate()
+
+
 # ==========================================================================
 # SINTESI VOCALE
 # macOS: comando nativo 'say'. Windows: sintetizzatore di sistema via PowerShell.
@@ -482,6 +602,19 @@ async def _sintetizza(testo: str) -> bytes:
     return bytes(audio)
 
 
+def inviluppo(campioni, frequenza: int, passo_ms: int = 50) -> list[float]:
+    """Volume (0-1) della voce ogni passo_ms, relativo al picco della frase."""
+    passo = max(1, frequenza * passo_ms // 1000)
+    livelli = []
+    for inizio in range(0, len(campioni), passo):
+        blocco = campioni[inizio:inizio + passo]
+        livelli.append(math.sqrt(sum(c * c for c in blocco) / len(blocco)))
+    picco = max(livelli, default=0.0)
+    if picco <= 0:
+        return [0.0] * len(livelli)
+    return [round(min(1.0, l / (0.7 * picco)), 3) for l in livelli]
+
+
 def _parla_neurale(testo: str) -> None:
     mp3 = asyncio.run(asyncio.wait_for(_sintetizza(testo), timeout=15))
     if not mp3:
@@ -492,6 +625,8 @@ def _parla_neurale(testo: str) -> None:
     uscita = pyaudio.PyAudio()
     try:
         flusso = uscita.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+        ritardo_ms = 1000 * flusso.get_output_latency()
+        HUD.imposta_voce(inviluppo(suono.samples, 24000), time.time() * 1000 + ritardo_ms, 50)
         flusso.write(suono.samples.tobytes())
         flusso.stop_stream()
         flusso.close()
@@ -1207,6 +1342,8 @@ def main() -> None:
 
     global URL_HUD
     URL_HUD = avvia_hud()
+    if URL_HUD:
+        avvia_monitor_sistema()
 
     client = anthropic.Anthropic()
     orecchie = Orecchie()
@@ -1254,12 +1391,15 @@ def main() -> None:
                 continue
             HUD.aggiungi("utente", frase)
             if azione == "dormi":
+                suona("riposo")
                 parla("Modalita' riposo. Mi chiami quando serve.")
                 continue
             if azione == "sveglia":
+                suona("attivo")
                 apri_hud()
                 parla("Di nuovo operativo.")
             elif azione == "attesa":
+                suona("attivo")
                 apri_hud()
                 parla("Mi dica.")
             elif not comando_locale(frase, scambi):

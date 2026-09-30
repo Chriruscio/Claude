@@ -9,42 +9,36 @@
   :root {
     --sfondo: #02070e;
     --sfondo-2: #06121f;
+    --pannello: rgba(8, 24, 38, 0.55);
+    --bordo: rgba(69, 212, 255, 0.22);
     --accento: #45d4ff;
     --accento-forte: #9be8ff;
     --testo: #cfe9f5;
     --testo-tenue: #5f7f93;
     --linea: rgba(69, 212, 255, 0.18);
-    --velocita: 1;          /* moltiplicatore della rotazione degli anelli */
-    --bagliore: 0.55;
+    --pericolo: #ff7a7a;
+    --mono: Consolas, "SF Mono", ui-monospace, monospace;
   }
 
-  /* Colori e ritmo per ogni stato */
-  body[data-stato="ascolto"]      { --velocita: 1;   --bagliore: 0.55; }
-  body[data-stato="attento"]      { --velocita: 1.6; --bagliore: 0.85; --accento: #6fe0ff; }
-  body[data-stato="elaborazione"] { --velocita: 4;   --bagliore: 0.9;  --accento: #ffc857; --accento-forte: #ffe3a3; }
-  body[data-stato="parla"]        { --velocita: 1.4; --bagliore: 1;    }
-  body[data-stato="dorme"]        { --velocita: 0.25; --bagliore: 0.18; --accento: #4a6a80; --accento-forte: #6f8ea3; }
-  body[data-stato="avvio"]        { --velocita: 0.6; --bagliore: 0.3; }
+  /* Il colore dello stato viene letto anche dal JavaScript per disegnare la sfera. */
+  body[data-stato="attento"]      { --accento: #6fe0ff; --accento-forte: #c2f2ff; }
+  body[data-stato="elaborazione"] { --accento: #ffc857; --accento-forte: #ffe3a3; }
+  body[data-stato="dorme"]        { --accento: #4a6a80; --accento-forte: #6f8ea3; }
   body[data-stato="spento"],
-  body[data-stato="offline"]      { --velocita: 0;   --bagliore: 0.12; --accento: #ff5a5a; --accento-forte: #ff9b9b; }
+  body[data-stato="offline"]      { --accento: #ff5a5a; --accento-forte: #ff9b9b; }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
-
   html, body { height: 100%; }
 
   body {
-    background:
-      radial-gradient(ellipse at 50% 38%, var(--sfondo-2) 0%, var(--sfondo) 62%),
-      var(--sfondo);
+    background: radial-gradient(ellipse at 50% 42%, var(--sfondo-2) 0%, var(--sfondo) 65%), var(--sfondo);
     color: var(--testo);
     font-family: "Segoe UI", "SF Pro Text", system-ui, sans-serif;
     overflow: hidden;
     display: grid;
     grid-template-rows: auto 1fr auto;
-    transition: color 0.6s;
   }
 
-  /* Griglia di fondo appena visibile */
   body::before {
     content: "";
     position: fixed;
@@ -53,131 +47,145 @@
       linear-gradient(var(--linea) 1px, transparent 1px),
       linear-gradient(90deg, var(--linea) 1px, transparent 1px);
     background-size: 48px 48px;
-    opacity: 0.18;
-    mask-image: radial-gradient(ellipse at center, #000 20%, transparent 75%);
+    opacity: 0.16;
+    mask-image: radial-gradient(ellipse at center, #000 15%, transparent 75%);
     pointer-events: none;
   }
 
+  /* ---------------- Intestazione ---------------- */
   header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    padding: 20px 28px;
-    font-family: Consolas, "SF Mono", ui-monospace, monospace;
+    align-items: baseline;
+    padding: 20px 28px 0;
+    font-family: var(--mono);
     letter-spacing: 0.3em;
     font-size: 13px;
     color: var(--testo-tenue);
     position: relative;
   }
   header .nome { color: var(--accento); font-weight: 600; transition: color 0.6s; }
+  #orologio { font-variant-numeric: tabular-nums; color: var(--testo); }
+  #data { margin-left: 14px; }
 
-  /* ---------------- Consumi ---------------- */
-  .consumi {
-    display: flex;
-    gap: 34px;
-    letter-spacing: 0.12em;
-  }
-  .misura { display: grid; gap: 4px; text-align: center; }
-  .misura .titolo { font-size: 10px; letter-spacing: 0.3em; color: var(--testo-tenue); }
-  .misura .valore {
-    font-size: 15px;
-    color: var(--testo);
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.06em;
-  }
-  .misura .nota { font-size: 10px; letter-spacing: 0.1em; color: var(--testo-tenue); }
-  .misura.basso .valore { color: #ff8a8a; }
-  #orologio { font-variant-numeric: tabular-nums; }
-
+  /* ---------------- Corpo: pannello | reattore | pannello ---------------- */
   main {
     display: grid;
-    place-items: center;
-    align-content: center;
-    gap: 28px;
-    position: relative;
+    grid-template-columns: minmax(200px, 250px) 1fr minmax(200px, 250px);
+    align-items: center;
+    gap: 24px;
+    padding: 12px 28px;
     min-height: 0;
+    position: relative;
   }
+
+  .pannello {
+    background: var(--pannello);
+    border: 1px solid var(--bordo);
+    border-radius: 6px;
+    padding: 18px 18px 8px;
+    backdrop-filter: blur(6px);
+    position: relative;
+  }
+  /* angoli "da HUD" */
+  .pannello::before, .pannello::after {
+    content: "";
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--accento);
+    transition: border-color 0.6s;
+  }
+  .pannello::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 6px; }
+  .pannello::after  { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 6px; }
+
+  .pannello h2 {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.35em;
+    color: var(--accento);
+    margin-bottom: 14px;
+    transition: color 0.6s;
+  }
+
+  .misura { margin-bottom: 14px; }
+  .misura .riga {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: var(--mono);
+  }
+  .misura .titolo { font-size: 10px; letter-spacing: 0.25em; color: var(--testo-tenue); }
+  .misura .valore { font-size: 15px; font-variant-numeric: tabular-nums; }
+  .misura .nota {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    color: var(--testo-tenue);
+    margin-top: 4px;
+    min-height: 1.2em;
+  }
+  .barra {
+    height: 3px;
+    margin-top: 6px;
+    background: rgba(95, 127, 147, 0.25);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .barra span {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: var(--accento);
+    box-shadow: 0 0 8px var(--accento);
+    transition: width 0.8s ease, background 0.6s;
+  }
+  .misura.alto .barra span { background: var(--pericolo); box-shadow: 0 0 8px var(--pericolo); }
+  .misura.alto .valore { color: var(--pericolo); }
 
   /* ---------------- Reattore ---------------- */
-  .reattore {
-    width: min(46vh, 80vw);
+  .centro {
+    display: grid;
+    justify-items: center;
+    gap: 14px;
+    min-width: 0;
+  }
+  #reattore {
+    width: min(52vh, 100%);
     aspect-ratio: 1;
-    position: relative;
-    filter: drop-shadow(0 0 calc(28px * var(--bagliore)) var(--accento));
-    transition: filter 0.6s;
+    display: block;
   }
-  .reattore svg { width: 100%; height: 100%; overflow: visible; }
-  .reattore circle, .reattore path { transition: stroke 0.6s, fill 0.6s, opacity 0.6s; }
-  .t  { stroke: var(--accento); }
-  .tf { stroke: var(--accento-forte); }
-  .f  { fill: var(--accento); }
-  .ff { fill: var(--accento-forte); }
-
-  .anello { transform-origin: 50% 50%; transform-box: fill-box; }
-  .gira-1 { animation: gira calc(40s / var(--velocita)) linear infinite; }
-  .gira-2 { animation: gira calc(22s / var(--velocita)) linear infinite reverse; }
-  .gira-3 { animation: gira calc(12s / var(--velocita)) linear infinite; }
-  body[data-stato="spento"] .anello,
-  body[data-stato="offline"] .anello { animation-play-state: paused; }
-
-  @keyframes gira { to { transform: rotate(360deg); } }
-
-  .nucleo {
-    transform-origin: 50% 50%;
-    transform-box: fill-box;
-    animation: respira 3.2s ease-in-out infinite;
-  }
-  body[data-stato="parla"] .nucleo { animation: pulsa 0.42s ease-in-out infinite alternate; }
-  body[data-stato="elaborazione"] .nucleo { animation: respira 0.9s ease-in-out infinite; }
-  body[data-stato="dorme"] .nucleo { animation: respira 6s ease-in-out infinite; }
-
-  @keyframes respira {
-    0%, 100% { transform: scale(0.92); opacity: 0.75; }
-    50%      { transform: scale(1);    opacity: 1; }
-  }
-  @keyframes pulsa {
-    from { transform: scale(0.86); }
-    to   { transform: scale(1.08); }
-  }
-
-  /* ---------------- Stato ---------------- */
-  .stato {
-    text-align: center;
-    font-family: Consolas, "SF Mono", ui-monospace, monospace;
-  }
+  .stato { text-align: center; font-family: var(--mono); }
   #etichetta {
-    font-size: clamp(18px, 2.6vw, 26px);
+    font-size: clamp(17px, 2.4vw, 24px);
     letter-spacing: 0.45em;
-    padding-left: 0.45em;       /* compensa la spaziatura dell'ultima lettera */
+    padding-left: 0.45em;
     color: var(--accento-forte);
     transition: color 0.6s;
   }
   #dettaglio {
     margin-top: 8px;
     min-height: 1.2em;
-    font-size: 13px;
+    font-size: 12px;
     letter-spacing: 0.2em;
     color: var(--testo-tenue);
     text-transform: uppercase;
   }
+  #onda { width: min(360px, 90%); height: 34px; display: block; }
 
   /* ---------------- Conversazione ---------------- */
-  footer {
-    padding: 0 28px 28px;
-    display: flex;
-    justify-content: center;
-  }
+  footer { padding: 0 28px 24px; display: flex; justify-content: center; }
   #storico {
     list-style: none;
     width: min(760px, 100%);
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    max-height: 32vh;
-    overflow: hidden;
-    mask-image: linear-gradient(to bottom, transparent 0, #000 40px);
     justify-content: flex-end;
+    gap: 9px;
+    max-height: 24vh;
+    overflow: hidden;
+    mask-image: linear-gradient(to bottom, transparent 0, #000 36px);
   }
   #storico li {
     display: grid;
@@ -189,7 +197,7 @@
     animation: entra 0.35s ease-out;
   }
   #storico .chi {
-    font-family: Consolas, "SF Mono", ui-monospace, monospace;
+    font-family: var(--mono);
     font-size: 11px;
     letter-spacing: 0.2em;
     color: var(--testo-tenue);
@@ -197,24 +205,30 @@
   }
   #storico li.jarvis .chi { color: var(--accento); }
   #storico li.utente .testo { color: #9fb6c4; }
-  #storico li.jarvis .testo { color: var(--testo); }
-
-  @keyframes entra {
-    from { opacity: 0; transform: translateY(6px); }
-    to   { opacity: 1; transform: none; }
-  }
+  @keyframes entra { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   @media (prefers-reduced-motion: reduce) {
-    .anello, .nucleo, #storico li { animation: none !important; }
+    #storico li { animation: none; }
   }
 
-  @media (max-width: 860px) {
-    header { flex-wrap: wrap; }
-    .consumi { order: 3; width: 100%; justify-content: space-between; gap: 12px; }
+  /* ---------------- Schermi stretti ---------------- */
+  @media (max-width: 900px) {
+    html, body { height: auto; }
+    body { min-height: 100%; overflow-y: auto; grid-template-rows: auto auto auto; }
+    main {
+      grid-template-columns: 1fr 1fr;
+      grid-template-areas: "centro centro" "sinistra destra";
+    }
+    .centro { grid-area: centro; }
+    #pannello-sistema { grid-area: sinistra; }
+    #pannello-sessione { grid-area: destra; }
+    #reattore { width: min(46vh, 90vw); }
+    #storico { max-height: none; }
   }
-
   @media (max-width: 560px) {
-    header { padding: 16px; letter-spacing: 0.18em; }
+    header { padding: 16px 16px 0; letter-spacing: 0.18em; }
+    #data { display: none; }
+    main { grid-template-columns: 1fr; grid-template-areas: "centro" "sinistra" "destra"; padding: 12px 16px; }
     footer { padding: 0 16px 20px; }
     #storico li { grid-template-columns: 56px 1fr; gap: 10px; font-size: 14px; }
   }
@@ -223,62 +237,59 @@
 <body data-stato="avvio">
   <header>
     <span class="nome">J.A.R.V.I.S.</span>
-    <div class="consumi" aria-label="Consumi">
-      <div class="misura">
-        <span class="titolo">TOKEN</span>
-        <span class="valore" id="token">&mdash;</span>
-        <span class="nota" id="token-nota">sessione</span>
-      </div>
-      <div class="misura">
-        <span class="titolo">SPESO</span>
-        <span class="valore" id="speso">&mdash;</span>
-        <span class="nota" id="speso-nota">stima</span>
-      </div>
-      <div class="misura" id="misura-credito">
-        <span class="titolo">CREDITO</span>
-        <span class="valore" id="credito">&mdash;</span>
-        <span class="nota" id="credito-nota">stima</span>
-      </div>
-    </div>
-    <span id="orologio">--:--:--</span>
+    <span><span id="orologio">--:--:--</span><span id="data"></span></span>
   </header>
 
   <main>
-    <div class="reattore" aria-hidden="true">
-      <svg viewBox="0 0 200 200">
-        <!-- anello esterno tratteggiato -->
-        <g class="anello gira-1">
-          <circle cx="100" cy="100" r="94" fill="none" class="t" stroke-width="1"
-                  stroke-dasharray="2 6" opacity="0.7"/>
-          <circle cx="100" cy="100" r="88" fill="none" class="t" stroke-width="0.6" opacity="0.35"/>
-        </g>
-        <!-- anello a segmenti -->
-        <g class="anello gira-2">
-          <circle cx="100" cy="100" r="76" fill="none" class="t" stroke-width="5"
-                  stroke-dasharray="38 10" opacity="0.55"/>
-        </g>
-        <!-- archi interni -->
-        <g class="anello gira-3">
-          <path d="M100 42 A58 58 0 0 1 158 100" fill="none" class="tf" stroke-width="2.2"
-                stroke-linecap="round"/>
-          <path d="M100 158 A58 58 0 0 1 42 100" fill="none" class="tf" stroke-width="2.2"
-                stroke-linecap="round"/>
-          <circle cx="100" cy="100" r="50" fill="none" class="t" stroke-width="0.8"
-                  stroke-dasharray="1 3" opacity="0.6"/>
-        </g>
-        <!-- nucleo -->
-        <g class="nucleo">
-          <circle cx="100" cy="100" r="34" fill="none" class="t" stroke-width="1.5" opacity="0.8"/>
-          <circle cx="100" cy="100" r="24" class="f" opacity="0.18"/>
-          <circle cx="100" cy="100" r="14" class="ff" opacity="0.9"/>
-        </g>
-      </svg>
+    <section class="pannello" id="pannello-sistema" aria-label="Sistema">
+      <h2>SISTEMA</h2>
+      <div class="misura" id="m-cpu">
+        <div class="riga"><span class="titolo">CPU</span><span class="valore">&mdash;</span></div>
+        <div class="barra"><span></span></div>
+        <div class="nota"></div>
+      </div>
+      <div class="misura" id="m-ram">
+        <div class="riga"><span class="titolo">MEMORIA</span><span class="valore">&mdash;</span></div>
+        <div class="barra"><span></span></div>
+        <div class="nota"></div>
+      </div>
+      <div class="misura" id="m-disco">
+        <div class="riga"><span class="titolo">DISCO</span><span class="valore">&mdash;</span></div>
+        <div class="barra"><span></span></div>
+        <div class="nota"></div>
+      </div>
+      <div class="misura" id="m-batteria">
+        <div class="riga"><span class="titolo">BATTERIA</span><span class="valore">&mdash;</span></div>
+        <div class="barra"><span></span></div>
+        <div class="nota"></div>
+      </div>
+    </section>
+
+    <div class="centro">
+      <canvas id="reattore" aria-hidden="true"></canvas>
+      <div class="stato" role="status" aria-live="polite">
+        <div id="etichetta">AVVIO</div>
+        <div id="dettaglio"></div>
+      </div>
+      <canvas id="onda" aria-hidden="true"></canvas>
     </div>
 
-    <div class="stato" role="status" aria-live="polite">
-      <div id="etichetta">AVVIO</div>
-      <div id="dettaglio"></div>
-    </div>
+    <section class="pannello" id="pannello-sessione" aria-label="Sessione">
+      <h2>SESSIONE</h2>
+      <div class="misura" id="m-token">
+        <div class="riga"><span class="titolo">TOKEN</span><span class="valore">&mdash;</span></div>
+        <div class="nota"></div>
+      </div>
+      <div class="misura" id="m-speso">
+        <div class="riga"><span class="titolo">SPESO</span><span class="valore">&mdash;</span></div>
+        <div class="nota"></div>
+      </div>
+      <div class="misura" id="m-credito">
+        <div class="riga"><span class="titolo">CREDITO</span><span class="valore">&mdash;</span></div>
+        <div class="barra"><span></span></div>
+        <div class="nota"></div>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -288,52 +299,123 @@
 <script>
   "use strict";
 
+  // ======================= Stato e testi =======================
+
   const ETICHETTE = {
-    avvio: "AVVIO",
-    ascolto: "IN ASCOLTO",
-    attento: "LA ASCOLTO, SIGNORE",
-    elaborazione: "ELABORAZIONE",
-    parla: "RISPOSTA",
-    dorme: "IN RIPOSO",
-    spento: "DISATTIVATO",
-    offline: "COLLEGAMENTO ASSENTE",
+    avvio: "AVVIO", ascolto: "IN ASCOLTO", attento: "LA ASCOLTO",
+    elaborazione: "ELABORAZIONE", parla: "RISPOSTA", dorme: "IN RIPOSO",
+    spento: "DISATTIVATO", offline: "COLLEGAMENTO ASSENTE",
   };
   const DETTAGLI = {
     ascolto: "dica “Jarvis”",
     dorme: "dica “Jarvis, svegliati”",
     offline: "J.A.R.V.I.S. non risponde",
   };
+  // Ritmo di ogni stato: velocita' di rotazione, luminosita' di base, respiro.
+  const RITMO = {
+    avvio:        { giri: 0.25, luce: 0.45, respiro: 0.05 },
+    ascolto:      { giri: 0.35, luce: 0.60, respiro: 0.04 },
+    attento:      { giri: 0.60, luce: 0.85, respiro: 0.06 },
+    elaborazione: { giri: 1.80, luce: 0.90, respiro: 0.10 },
+    parla:        { giri: 0.55, luce: 1.00, respiro: 0.00 },
+    dorme:        { giri: 0.08, luce: 0.25, respiro: 0.03 },
+    spento:       { giri: 0.00, luce: 0.18, respiro: 0.00 },
+    offline:      { giri: 0.00, luce: 0.18, respiro: 0.00 },
+  };
 
   const corpo = document.body;
   const etichetta = document.getElementById("etichetta");
   const dettaglio = document.getElementById("dettaglio");
   const storico = document.getElementById("storico");
-  const orologio = document.getElementById("orologio");
+  const menoMovimento = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  let stato = "avvio";
+  let colore = [69, 212, 255];
+  let coloreForte = [155, 232, 255];
   let versioneMostrata = -1;
+  let voce = { id: -1, inizio: 0, passo: 50, livelli: [] };
   let ultimoSuccesso = Date.now();
 
-  function mostraStato(stato, testoDettaglio) {
-    corpo.dataset.stato = stato;
-    etichetta.textContent = ETICHETTE[stato] || stato.toUpperCase();
-    dettaglio.textContent = testoDettaglio || DETTAGLI[stato] || "";
+  function rgb(testo) {
+    const esadecimale = testo.trim().replace("#", "");
+    return [0, 2, 4].map((i) => parseInt(esadecimale.slice(i, i + 2), 16));
+  }
+
+  function mostraStato(nuovo, testoDettaglio) {
+    if (nuovo !== stato) {
+      stato = nuovo;
+      corpo.dataset.stato = nuovo;
+      const stile = getComputedStyle(corpo);
+      colore = rgb(stile.getPropertyValue("--accento"));
+      coloreForte = rgb(stile.getPropertyValue("--accento-forte"));
+    }
+    etichetta.textContent = ETICHETTE[nuovo] || nuovo.toUpperCase();
+    dettaglio.textContent = testoDettaglio || DETTAGLI[nuovo] || "";
   }
 
   // Il testo arriva dal riconoscimento vocale e dal modello: sempre textContent, mai innerHTML.
   function mostraStorico(voci) {
-    storico.replaceChildren(...voci.slice(-6).map((voce) => {
+    storico.replaceChildren(...voci.slice(-6).map((v) => {
       const riga = document.createElement("li");
-      riga.className = voce.chi === "jarvis" ? "jarvis" : "utente";
+      riga.className = v.chi === "jarvis" ? "jarvis" : "utente";
       const chi = document.createElement("span");
       chi.className = "chi";
-      chi.textContent = voce.chi === "jarvis" ? "JARVIS" : "TU";
+      chi.textContent = v.chi === "jarvis" ? "JARVIS" : "TU";
       const testo = document.createElement("span");
       testo.className = "testo";
-      testo.textContent = voce.testo;
+      testo.textContent = v.testo;
       riga.append(chi, testo);
       return riga;
     }));
   }
+
+  // ======================= Pannelli =======================
+
+  const numero = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 });
+  const token = (n) => n >= 1e6 ? numero.format(n / 1e6) + "M" : n >= 1e3 ? numero.format(n / 1e3) + "k" : String(n);
+  const dollari = (n, c) => n.toLocaleString("it-IT", { minimumFractionDigits: c, maximumFractionDigits: c }) + " $";
+  const spesa = (n) => dollari(n, n < 0.1 ? 3 : 2);
+
+  function misura(id, valore, nota, percentuale, alto) {
+    const m = document.getElementById(id);
+    m.querySelector(".valore").textContent = valore;
+    m.querySelector(".nota").textContent = nota || "";
+    const barra = m.querySelector(".barra span");
+    if (barra) barra.style.width = (percentuale == null ? 0 : Math.max(0, Math.min(100, percentuale))) + "%";
+    m.classList.toggle("alto", !!alto);
+  }
+
+  function mostraSistema(s) {
+    if (!s) return;
+    const manca = "installare psutil";
+    misura("m-cpu", s.cpu == null ? "—" : Math.round(s.cpu) + "%", s.cpu == null ? manca : "carico attuale", s.cpu, s.cpu > 85);
+    misura("m-ram", s.ram == null ? "—" : Math.round(s.ram) + "%",
+      s.ram == null ? manca : numero.format(s.ram_usata) + " / " + numero.format(s.ram_totale) + " GB", s.ram, s.ram > 90);
+    misura("m-disco", s.disco == null ? "—" : Math.round(s.disco) + "%",
+      s.disco_libero == null ? "" : s.disco_libero + " GB liberi", s.disco, s.disco > 90);
+    if (s.batteria == null) {
+      misura("m-batteria", "—", s.cpu == null ? manca : "nessuna batteria", null, false);
+    } else {
+      misura("m-batteria", s.batteria + "%", s.in_carica ? "in carica" : "a batteria", s.batteria, s.batteria < 15 && !s.in_carica);
+    }
+  }
+
+  function mostraConsumi(c) {
+    if (!c) return;
+    const s = c.sessione, t = c.totale;
+    misura("m-token", token(s.token_input) + " in · " + token(s.token_output) + " out",
+      s.richieste + (s.richieste === 1 ? " richiesta" : " richieste") + " in questa sessione");
+    if (c.prezzi_noti) misura("m-speso", spesa(s.spesa), "sessione · totale " + spesa(t.spesa));
+    else misura("m-speso", "n/d", "modello senza listino");
+    if (c.residuo === null) {
+      misura("m-credito", "—", "imposta con --credito", null, false);
+    } else {
+      misura("m-credito", dollari(c.residuo, 2), "stima su " + dollari(c.credito, 2),
+        c.credito > 0 ? 100 * c.residuo / c.credito : 0, c.residuo < Math.max(0.5, c.credito * 0.1));
+    }
+  }
+
+  // ======================= Collegamento con J.A.R.V.I.S. =======================
 
   async function aggiorna() {
     try {
@@ -343,62 +425,194 @@
       ultimoSuccesso = Date.now();
       mostraStato(dati.stato, dati.dettaglio);
       mostraConsumi(dati.consumi);
+      mostraSistema(dati.sistema);
+      if (dati.voce && dati.voce.id !== voce.id) voce = dati.voce;
       if (dati.versione !== versioneMostrata) {
         versioneMostrata = dati.versione;
         mostraStorico(dati.storico);
       }
     } catch (errore) {
-      if (Date.now() - ultimoSuccesso > 2000 && corpo.dataset.stato !== "spento") {
-        mostraStato("offline");
-      }
+      if (Date.now() - ultimoSuccesso > 2000 && stato !== "spento") mostraStato("offline");
     }
   }
 
-  const numero = new Intl.NumberFormat("it-IT", { maximumFractionDigits: 1 });
-  function token(n) {
-    if (n >= 1e6) return numero.format(n / 1e6) + "M";
-    if (n >= 1e3) return numero.format(n / 1e3) + "k";
-    return String(n);
-  }
-  function dollari(n, cifre) {
-    return n.toLocaleString("it-IT", { minimumFractionDigits: cifre, maximumFractionDigits: cifre }) + " $";
-  }
-  // Sotto un centesimo si mostrano i millesimi, altrimenti ogni domanda sembrerebbe gratis.
-  function spesa(n) { return dollari(n, n < 0.1 ? 3 : 2); }
-
-  function mostraConsumi(c) {
-    if (!c) return;
-    const s = c.sessione, t = c.totale;
-    document.getElementById("token").textContent = token(s.token_input) + " in \u00b7 " + token(s.token_output) + " out";
-    document.getElementById("token-nota").textContent =
-      "sessione \u00b7 " + s.richieste + (s.richieste === 1 ? " richiesta" : " richieste");
-    if (c.prezzi_noti) {
-      document.getElementById("speso").textContent = spesa(s.spesa);
-      document.getElementById("speso-nota").textContent = "sessione \u00b7 totale " + spesa(t.spesa);
-    } else {
-      document.getElementById("speso").textContent = "n/d";
-      document.getElementById("speso-nota").textContent = "modello senza listino";
-    }
-    const misura = document.getElementById("misura-credito");
-    if (c.residuo === null) {
-      document.getElementById("credito").textContent = "\u2014";
-      document.getElementById("credito-nota").textContent = "imposta con --credito";
-      misura.classList.remove("basso");
-    } else {
-      document.getElementById("credito").textContent = dollari(c.residuo, 2);
-      document.getElementById("credito-nota").textContent = "stima su " + dollari(c.credito, 2);
-      misura.classList.toggle("basso", c.residuo < Math.max(0.5, c.credito * 0.1));
-    }
+  // Volume della voce in questo istante: dall'inviluppo inviato da J.A.R.V.I.S.,
+  // allineato all'orologio (stessa macchina). Con la voce di sistema non c'e'
+  // inviluppo: si simula un parlato generico.
+  function livelloVoce(adesso) {
+    const indice = Math.floor((adesso - voce.inizio) / voce.passo);
+    if (indice >= 0 && indice < voce.livelli.length) return voce.livelli[indice];
+    if (stato === "parla") return 0.35 + 0.3 * Math.abs(Math.sin(adesso / 140)) * Math.abs(Math.sin(adesso / 390));
+    return 0;
   }
 
+  // ======================= Sfera 3D =======================
+
+  const tela = document.getElementById("reattore");
+  const ctx = tela.getContext("2d");
+  const telaOnda = document.getElementById("onda");
+  const ctxOnda = telaOnda.getContext("2d");
+
+  // Punti distribuiti in modo uniforme sulla sfera (spirale di Fibonacci).
+  const PUNTI = [];
+  const QUANTI = 520;
+  const aureo = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < QUANTI; i++) {
+    const y = 1 - (i / (QUANTI - 1)) * 2;
+    const r = Math.sqrt(1 - y * y);
+    PUNTI.push([Math.cos(aureo * i) * r, y, Math.sin(aureo * i) * r, Math.random()]);
+  }
+
+  let lato = 0;
+  let larghezzaOnda = 0;
+  function ridimensiona() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const box = tela.getBoundingClientRect();
+    lato = box.width;
+    tela.width = Math.round(box.width * dpr);
+    tela.height = Math.round(box.width * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const bo = telaOnda.getBoundingClientRect();
+    larghezzaOnda = bo.width;
+    telaOnda.width = Math.round(bo.width * dpr);
+    telaOnda.height = Math.round(bo.height * dpr);
+    ctxOnda.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  const osservatore = new ResizeObserver(ridimensiona);
+  osservatore.observe(tela);
+  osservatore.observe(telaOnda);
+
+  const col = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+  let angolo = 0;
+  let livello = 0;          // livello della voce, smussato
+  let luce = 0.5;           // luminosita', smussata tra uno stato e l'altro
+  let giri = 0.3;
+  const storiaLivelli = new Array(56).fill(0);
+  let ultimoFotogramma = performance.now();
+  let ultimoCampione = 0;
+
+  function disegna(ora) {
+    const dt = Math.min(0.05, (ora - ultimoFotogramma) / 1000);
+    ultimoFotogramma = ora;
+    const adesso = Date.now();
+    const ritmo = RITMO[stato] || RITMO.ascolto;
+
+    // transizioni morbide
+    giri += ((menoMovimento ? ritmo.giri * 0.2 : ritmo.giri) - giri) * Math.min(1, dt * 3);
+    luce += (ritmo.luce - luce) * Math.min(1, dt * 3);
+    const bersaglio = livelloVoce(adesso);
+    livello += (bersaglio - livello) * Math.min(1, dt * (bersaglio > livello ? 18 : 8));
+    const respiro = ritmo.respiro * Math.sin(ora / 900);
+    angolo += dt * giri;
+
+    const c = lato / 2;
+    const R = lato * 0.26 * (1 + respiro + 0.14 * livello);
+    ctx.clearRect(0, 0, lato, lato);
+
+    // alone
+    const alone = ctx.createRadialGradient(c, c, R * 0.2, c, c, R * 1.9);
+    alone.addColorStop(0, col(colore, 0.22 * luce + 0.25 * livello));
+    alone.addColorStop(1, col(colore, 0));
+    ctx.fillStyle = alone;
+    ctx.fillRect(0, 0, lato, lato);
+
+    // sfera di particelle: rotazione su due assi e prospettiva
+    const sy = Math.sin(angolo), cy = Math.cos(angolo);
+    const inclinazione = 0.42 + 0.1 * Math.sin(angolo * 0.37);
+    const sx = Math.sin(inclinazione), cx = Math.cos(inclinazione);
+    const distanza = 3.2;
+    for (const [x0, y0, z0, fase] of PUNTI) {
+      const x1 = x0 * cy + z0 * sy;
+      const z1 = -x0 * sy + z0 * cy;
+      const y2 = y0 * cx - z1 * sx;
+      const z2 = y0 * sx + z1 * cx;
+      const scala = distanza / (distanza - z2);
+      const px = c + x1 * R * scala;
+      const py = c + y2 * R * scala;
+      const profondita = (z2 + 1) / 2;                          // 0 dietro, 1 davanti
+      const scintilla = 0.75 + 0.25 * Math.sin(ora / 400 + fase * 20);
+      const alfa = (0.12 + 0.75 * profondita) * luce * scintilla;
+      ctx.fillStyle = col(profondita > 0.8 ? coloreForte : colore, Math.min(1, alfa + livello * 0.3));
+      const dimensione = (0.6 + 1.3 * profondita) * scala * (1 + livello * 0.6);
+      ctx.fillRect(px - dimensione / 2, py - dimensione / 2, dimensione, dimensione);
+    }
+
+    // nucleo
+    const nucleo = ctx.createRadialGradient(c, c, 0, c, c, R * 0.42);
+    nucleo.addColorStop(0, col(coloreForte, 0.55 * luce + 0.45 * livello));
+    nucleo.addColorStop(1, col(colore, 0));
+    ctx.fillStyle = nucleo;
+    ctx.beginPath();
+    ctx.arc(c, c, R * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+
+    // anelli esterni
+    ctx.lineCap = "round";
+    const anello = (raggio, spessore, alfa, trattini, rotazione, arco) => {
+      ctx.save();
+      ctx.translate(c, c);
+      ctx.rotate(rotazione);
+      ctx.strokeStyle = col(colore, alfa);
+      ctx.lineWidth = spessore;
+      ctx.setLineDash(trattini);
+      ctx.beginPath();
+      ctx.arc(0, 0, raggio, 0, arco || Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    };
+    const spinta = 1 + livello * 0.05;
+    anello(lato * 0.40 * spinta, 1, 0.55 * luce, [1.5, 6], angolo * 0.4);
+    anello(lato * 0.37 * spinta, 3, 0.45 * luce, [lato * 0.16, lato * 0.035], -angolo * 0.7);
+    anello(lato * 0.33 * spinta, 1.8, 0.8 * luce, [], angolo * 1.3, Math.PI * 0.55);
+    anello(lato * 0.33 * spinta, 1.8, 0.8 * luce, [], angolo * 1.3 + Math.PI, Math.PI * 0.55);
+
+    // tacche del quadrante
+    ctx.save();
+    ctx.translate(c, c);
+    ctx.rotate(-angolo * 0.15);
+    for (let i = 0; i < 72; i++) {
+      const lungo = i % 6 === 0;
+      ctx.rotate(Math.PI * 2 / 72);
+      ctx.fillStyle = col(colore, (lungo ? 0.7 : 0.3) * luce);
+      ctx.fillRect(lato * 0.445, -0.6, lungo ? lato * 0.025 : lato * 0.012, 1.2);
+    }
+    ctx.restore();
+
+    // onda della voce: barre che scorrono
+    if (ora - ultimoCampione > 45) {
+      ultimoCampione = ora;
+      storiaLivelli.push(livello);
+      storiaLivelli.shift();
+    }
+    const larghezza = larghezzaOnda;
+    const altezza = 34;
+    ctxOnda.clearRect(0, 0, larghezza, altezza);
+    const passo = larghezza / storiaLivelli.length;
+    storiaLivelli.forEach((v, i) => {
+      const h = Math.max(1.5, v * altezza * 0.9);
+      ctxOnda.fillStyle = col(colore, 0.25 + 0.6 * v);
+      ctxOnda.fillRect(i * passo + passo * 0.2, (altezza - h) / 2, passo * 0.6, h);
+    });
+
+    requestAnimationFrame(disegna);
+  }
+
+  // ======================= Orologio =======================
+
+  const formatoData = new Intl.DateTimeFormat("it-IT", { weekday: "long", day: "numeric", month: "long" });
   function aggiornaOrologio() {
-    orologio.textContent = new Date().toLocaleTimeString("it-IT");
+    const d = new Date();
+    document.getElementById("orologio").textContent = d.toLocaleTimeString("it-IT");
+    document.getElementById("data").textContent = formatoData.format(d).toUpperCase();
   }
 
+  ridimensiona();
+  mostraStato("avvio");
   aggiorna();
   aggiornaOrologio();
   setInterval(aggiorna, 300);
   setInterval(aggiornaOrologio, 1000);
+  requestAnimationFrame(disegna);
 </script>
 </body>
 </html>

@@ -276,6 +276,43 @@ class TestSaluto(unittest.TestCase):
         self.assertEqual(jarvis.saluto(2), "Buonasera")
 
 
+class TestHudVivo(unittest.TestCase):
+    def test_inviluppo(self):
+        silenzio = [0] * 2400
+        forte = [10000, -10000] * 1200
+        livelli = jarvis.inviluppo(silenzio + forte, 24000, 50)
+        self.assertEqual(len(livelli), 4)                    # 4800 campioni / 1200 per blocco
+        self.assertEqual(livelli[:2], [0.0, 0.0])
+        self.assertEqual(livelli[2:], [1.0, 1.0])
+        self.assertEqual(jarvis.inviluppo([0] * 100, 24000), [0.0])
+        self.assertEqual(jarvis.inviluppo([], 24000), [])
+
+    def test_segnale_sonoro(self):
+        dati = jarvis.sintetizza_segnale([(880.0, 0.1)])
+        self.assertEqual(len(dati), 2 * int(jarvis.FREQUENZA_AUDIO * 0.1))
+        import array
+        campioni = array.array("h", dati)
+        self.assertEqual(campioni[0], 0)                      # attacco morbido, niente click
+        self.assertLess(max(abs(c) for c in campioni), 32767 * 0.2)
+
+    def test_raccogli_sistema_senza_psutil(self):
+        originale = jarvis.psutil
+        jarvis.psutil = None
+        try:
+            dati = jarvis.raccogli_sistema()
+        finally:
+            jarvis.psutil = originale
+        self.assertIsNone(dati["cpu"])
+        self.assertIsNotNone(dati["disco"])
+
+    def test_voce_e_sistema_nello_stato(self):
+        jarvis.HUD.imposta_voce([0.1, 0.9], 1000.0, 50)
+        jarvis.HUD.imposta_sistema({"cpu": 12.5})
+        dati = jarvis.HUD.istantanea()
+        self.assertEqual(dati["voce"]["livelli"], [0.1, 0.9])
+        self.assertEqual(dati["sistema"]["cpu"], 12.5)
+
+
 class TestStatoSistema(unittest.TestCase):
     def test_giorno_della_settimana(self):
         from datetime import datetime

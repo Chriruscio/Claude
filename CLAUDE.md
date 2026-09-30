@@ -5,7 +5,7 @@ Assistente vocale in italiano per macOS e Windows basato sull'API Claude: ascolt
 
 ## 2. File coinvolti
 - `jarvis.py` — unico file del programma. Contiene configurazione, rilevamento del sistema operativo, sintesi vocale, ascolto microfonico, whitelist applicazioni (una per sistema), sandbox dei file, implementazione degli strumenti, ciclo di dialogo con l'API e loop principale.
-- `hud.html` — la pagina dell'HUD (reattore animato, stato, ultime 6 battute, riquadri token / speso / credito). Legge `/stato` ogni 300 ms e inserisce i testi solo con `textContent`.
+- `hud.html` — la pagina dell'HUD: sfera di particelle 3D disegnata su canvas (nessuna libreria esterna) con anelli e quadrante, che segue lo stato e il volume della voce; onda della voce; pannello SISTEMA (CPU, memoria, disco, batteria) e pannello SESSIONE (token, speso, credito); ultime 6 battute. Legge `/stato` ogni 300 ms e inserisce i testi solo con `textContent`.
 - `~/Jarvis/consumi.json` — credito indicato dall'utente e consumi sommati da allora (token, ricerche, richieste, spesa stimata). Fuori dalla sandbox.
 - `app_windows.json` / `app_mac.json` (facoltativi, non versionati) — elenco personale di app, accanto a `jarvis.py`. Si aggiunge all'elenco di base e ne sostituisce le voci con lo stesso nome. Se il file ha errori, J.A.R.V.I.S. lo segnala all'avvio e usa solo l'elenco di base. Esempio da copiare: `app_windows.esempio.json`.
 - `test_jarvis.py` — test della logica indipendente dall'hardware (sandbox, comandi locali, ciclo di dialogo con client finto). `python3 -m unittest test_jarvis -v`.
@@ -21,6 +21,8 @@ Filtro di attenzione:
 Avvio senza finestre (Windows: `pyw -3.13 jarvis.py`): con `pythonw` stdout e stderr non esistono, quindi vengono rediretti su `~/Jarvis/jarvis.log` (azzerato all'avvio oltre 1 MB) prima di ogni import che può fallire. I processi figli (PowerShell, `taskkill`) partono con `CREATE_NO_WINDOW`. Un errore all'avvio viene annunciato a voce. Un file di blocco (`~/Jarvis/jarvis.lock`) impedisce due istanze contemporanee.
 
 HUD: all'avvio parte in sottofondo un server HTTP su `127.0.0.1:8765` (`JARVIS_HUD_PORTA`; `JARVIS_HUD=0` per disattivarlo; se la porta è occupata J.A.R.V.I.S. continua senza). Stati: `avvio`, `ascolto`, `attento` (finestra di 8 s), `elaborazione` (con il nome dello strumento), `parla`, `dorme`, `spento`; la pagina mostra `offline` se il server non risponde. "Ehi Jarvis" e "Jarvis, svegliati" aprono la pagina solo se non è già collegata (nessuna richiesta negli ultimi 2 s); su Windows in Edge modalità app (finestra senza barre), altrimenti nel browser predefinito.
+
+HUD vivo: con la voce neurale `_parla_neurale` calcola l'inviluppo del volume (un valore 0-1 ogni 50 ms, `inviluppo()`) e lo pubblica con l'istante di inizio (`time.time()` + latenza d'uscita); la pagina, sulla stessa macchina, legge il livello del momento con `Date.now()`. Con la voce di sistema non c'è inviluppo e la pagina simula un parlato generico. Un thread aggiorna ogni 2 s i dati di sistema (`raccogli_sistema()`, CPU e memoria solo con `psutil` installato). Segnali sonori sintetizzati in Python e suonati con `pyaudio` (`JARVIS_SUONI=0` per toglierli): salita all'attivazione, discesa alla pausa. Non li suona la pagina perché i browser bloccano l'audio senza un clic.
 
 Consumi: dopo ogni chiamata all'API `CONSUMI.registra(risposta.usage)` somma token e ricerche web e stima il costo con `PREZZI_MODELLI` (Haiku 4.5: 1 $ / 5 $ per milione di token in / out; ricerca web 0,01 $). Per un modello fuori listino la spesa risulta `n/d`. `py jarvis.py --credito 5` registra il credito letto nella Console e azzera i totali: il residuo mostrato è credito meno spesa stimata. Nella prima prova reale una domanda semplice pesava circa 3.000 token in ingresso (istruzioni + strumenti + memoria).
 
@@ -75,7 +77,7 @@ L'unico punto in ascolto è il server dell'HUD: solo `127.0.0.1`, solo `GET /` e
 - Permessi macOS non ancora concessi: Microfono per il Terminale, Automazione per `chiudi_app`.
 - Windows (verificato il 25/09/2026 con Python 3.13): test automatici OK, voce italiana "Microsoft Elsa Desktop", microfono e trascrizione, apertura e chiusura di Blocco note, stato del sistema. Serve Python 3.13 (`py -3.13`): `pyaudio` 0.2.14 non ha pacchetti pronti per la 3.14.
 - Windows: gli altri bersagli in `APP_WIN` non sono ancora stati provati; i nomi dei processi di Calcolatrice, Impostazioni e Spotify vanno confermati con Gestione attività.
-- HUD verificato solo su Linux (Chromium headless, schermate desktop e telefono). Mai aperto su Windows né in Edge modalità app.
+- HUD nuovo (sfera 3D, pannelli, onda) verificato solo su Linux: Chromium headless, schermate desktop e telefono, circa 60 fotogrammi al secondo senza GPU. Segnali sonori e sincronia voce/animazione mai sentiti né visti su Windows.
 - Voce neurale verificata su Windows: l'utente ha scelto it-IT-GiuseppeMultilingualNeural tra le voci maschili multilingue. Grafie di `PRONUNCIA` non ancora ascoltate.
 - Windows: ciclo completo verificato con chiamate API reali (domanda, strumento, risposta a voce). "Ehi Jarvis" da solo trascritto male da Google ("Ehi ya"): più affidabile "Jarvis" all'inizio di una frase.
 - Mai eseguito finora: tutto il lato Mac.
