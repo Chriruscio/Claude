@@ -799,9 +799,10 @@ APP_WIN = {
 }
 
 # Elenco personale, modificabile a mano: si aggiunge a quello di base e ne sostituisce
-# le voci con lo stesso nome. Sta accanto a jarvis.py, MAI dentro la sandbox:
+# le voci con lo stesso nome. Sta in ~/Jarvis, che gli aggiornamenti non toccano
+# (la cartella del codice invece viene sostituita), e MAI dentro la sandbox:
 # se il modello potesse scriverci, potrebbe mettere in lista qualunque programma.
-FILE_APP = Path(__file__).resolve().parent / ("app_windows.json" if IS_WIN else "app_mac.json")
+FILE_APP = CARTELLA_JARVIS / ("app_windows.json" if IS_WIN else "app_mac.json")
 
 
 def _voce_app_valida(valore) -> bool:
@@ -1138,7 +1139,8 @@ def esegui_tool(nome: str, argomenti: dict) -> str:
 # ==========================================================================
 
 CARTELLA_CODICE_JARVIS = Path(__file__).resolve().parent
-FILE_PROGETTI = CARTELLA_CODICE_JARVIS / ("progetti_windows.json" if IS_WIN else "progetti_mac.json")
+# In ~/Jarvis come l'elenco delle app: sopravvive agli aggiornamenti, fuori dalla sandbox.
+FILE_PROGETTI = CARTELLA_JARVIS / ("progetti_windows.json" if IS_WIN else "progetti_mac.json")
 CARTELLA_REPORT = CARTELLA_JARVIS / "claude_code"
 VERSIONE_MINIMA_CLAUDE = (2, 1, 259)   # --restricted dalla 2.1.248, --permission-prompts dalla 2.1.259
 DURATA_MASSIMA_LAVORO = 30 * 60        # secondi
